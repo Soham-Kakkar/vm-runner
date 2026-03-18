@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,10 @@ var (
 	ErrSessionExists   = errors.New("a session is already active")
 	ErrSessionNotFound = errors.New("session not found")
 )
+
+// Define the flag regex globally for efficiency.
+// It matches "flag{" followed by any character that is not a bracket, ending with "}".
+var flagRegex = regexp.MustCompile(`flag\{[^{}]*\}`)
 
 // Session represents an active challenge session.
 type Session struct {
@@ -40,7 +45,7 @@ type SessionManager struct {
 func NewSessionManager(challengeStore *storage.FileStore, flagFoundChan chan FlagFoundEvent) *SessionManager {
 	return &SessionManager{
 		challengeStore: challengeStore,
-		flagFoundChan: flagFoundChan,
+		flagFoundChan:  flagFoundChan,
 	}
 }
 
@@ -200,18 +205,26 @@ func (sm *SessionManager) monitorVM(session *Session) {
 	}
 }
 
-// checkForFlag scans VM output for answers.
+// checkForFlag scans VM output for anything matching flag{...}.
+// If a match is found, it's checked against all incomplete questions.
 func (sm *SessionManager) checkForFlag(session *Session, output string) {
-	for _, q := range session.Challenge.Questions {
-		if !session.CompletedQuestions[q.ID] && strings.Contains(output, q.Answer) {
-			
-			session.CompletedQuestions[q.ID] = true
+	matches := flagRegex.FindAllString(output, -1)
+	if len(matches) == 0 {
+		return
+	}
 
-			// Notify the hub/handler via channel
-			if sm.flagFoundChan != nil {
-				sm.flagFoundChan <- FlagFoundEvent{
-					SessionID:  session.ID,
-					QuestionID: q.ID,
+	for _, match := range matches {
+		for _, q := range session.Challenge.Questions {
+			if !session.CompletedQuestions[q.ID] && match == q.Answer {
+				
+				session.CompletedQuestions[q.ID] = true
+
+				// Notify the handler via channel
+				if sm.flagFoundChan != nil {
+					sm.flagFoundChan <- FlagFoundEvent{
+						SessionID:  session.ID,
+						QuestionID: q.ID,
+					}
 				}
 			}
 		}

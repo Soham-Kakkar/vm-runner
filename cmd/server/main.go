@@ -4,7 +4,7 @@ import (
 	"log"
 	"net/http"
 
-	"vm-runner/internal/handler"
+	"vm-runner/internal/handlers"
 	"vm-runner/internal/service"
 	"vm-runner/internal/storage"
 )
