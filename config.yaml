@@ -1,0 +1,16 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+vm:
+  default_memory_mb: 1024
+  default_cpus: 1
+  default_timeout_seconds: 300
+  qemu:
+    binary_path: "/usr/bin/qemu-system-x86_64"
+  image_storage_path: "./uploads"
+  challenge_data_path: "./data/challenges"
+
+websocket:
+  ping_interval_seconds: 30
+  max_message_size_mb: 10

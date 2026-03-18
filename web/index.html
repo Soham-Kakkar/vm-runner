@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VM-Based CTF</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.15.0/css/xterm.css" />
+</head>
+<body>
+    <div id="container">
+        <div id="challenge-panel">
+            <h1>Challenges</h1>
+            <ul id="challenge-list"></ul>
+            <div id="session-view" class="hidden">
+                <h2 id="session-challenge-name"></h2>
+                <div id="questions-container"></div>
+                <div id="vm-log-container">
+                    <h3>VM Output Log</h3>
+                    <textarea id="vm-log" readonly></textarea>
+                </div>
+                <button id="end-session-btn">End Session</button>
+            </div>
+        </div>
+        <div id="terminal-panel">
+            <div id="terminal"></div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@4.15.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
