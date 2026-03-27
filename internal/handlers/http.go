@@ -46,15 +46,15 @@ func (h *HTTPHandler) handleListChallenges(w http.ResponseWriter, r *http.Reques
 
 	// Create a simpler response model for the frontend
 	type challengeResponse struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
+		ID            string `json:"id"`
+		Name          string `json:"name"`
 		QuestionCount int    `json:"question_count"`
 	}
 	response := make([]challengeResponse, len(challenges))
 	for i, ch := range challenges {
 		response[i] = challengeResponse{
-			ID:           ch.ID,
-			Name:         ch.Name,
+			ID:            ch.ID,
+			Name:          ch.Name,
 			QuestionCount: len(ch.Questions),
 		}
 	}
@@ -114,13 +114,13 @@ func (h *HTTPHandler) respondWithSession(w http.ResponseWriter, session *service
 		Text        string `json:"text"`
 		IsCompleted bool   `json:"is_completed"`
 	}
-	
+
 	questions := make([]questionResponse, len(session.Challenge.Questions))
 	for i, q := range session.Challenge.Questions {
 		questions[i] = questionResponse{
-			ID: q.ID,
-			Order: q.Order,
-			Text: q.Text,
+			ID:          q.ID,
+			Order:       q.Order,
+			Text:        q.Text,
 			IsCompleted: session.CompletedQuestions[q.ID],
 		}
 	}
@@ -130,17 +130,21 @@ func (h *HTTPHandler) respondWithSession(w http.ResponseWriter, session *service
 		"challenge_id":  session.Challenge.ID,
 		"websocket_url": "/ws/" + session.ID,
 		"questions":     questions,
+		"display_type":  session.Challenge.VMConfig.DisplayType,
+	}
+
+	if session.Challenge.VMConfig.DisplayType == "vnc" {
+		response["vnc_url"] = "/vnc/" + session.ID
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-
 // handleSessionRoutes delegates requests for /api/sessions/:id/...
 func (h *HTTPHandler) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/")
-	
+
 	if len(pathParts) < 2 {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
@@ -148,15 +152,34 @@ func (h *HTTPHandler) handleSessionRoutes(w http.ResponseWriter, r *http.Request
 
 	sessionID := pathParts[0]
 	action := pathParts[1]
-	
+
 	switch action {
 	case "submit":
 		h.handleSubmitAnswer(w, r, sessionID)
+	case "end":
+		h.handleEndSession(w, r, sessionID)
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
 }
 
+// handleEndSession stops an active session.
+func (h *HTTPHandler) handleEndSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	// Accept POST or DELETE to end a session
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := h.sessionManager.EndSession(sessionID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ended"})
+}
 
 // handleSubmitAnswer handles answer submission for a session.
 func (h *HTTPHandler) handleSubmitAnswer(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -164,7 +187,7 @@ func (h *HTTPHandler) handleSubmitAnswer(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	var req struct {
 		Answer string `json:"answer"`
 	}

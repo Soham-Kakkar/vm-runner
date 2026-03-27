@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"vm-runner/internal/service"
@@ -57,6 +58,81 @@ func (h *WebSocketHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 	go client.writePump()
 	go client.readPump()
+}
+
+func (h *WebSocketHandler) ServeVNC(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimPrefix(r.URL.Path, "/vnc/")
+	if sessionID == "" {
+		http.Error(w, "Session ID is required", http.StatusBadRequest)
+		return
+	}
+
+	session := h.sessionManager.GetActiveSession()
+	if session == nil || session.ID != sessionID {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	// For the MVP, assume VNC WebSocket is on 127.0.0.1:5701
+	targetAddr := "127.0.0.1:5701"
+
+	// Upgrade the incoming connection to a WebSocket
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade VNC connection for session %s: %v", sessionID, err)
+		return
+	}
+	defer conn.Close()
+
+	// Connect to the QEMU VNC server (which also speaks WebSocket)
+	// Give it a few tries in case it's still starting
+	var qemuConn *websocket.Conn
+	dialer := websocket.Dialer{}
+	for i := 0; i < 5; i++ {
+		qemuConn, _, err = dialer.Dial("ws://"+targetAddr, nil)
+		if err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if err != nil {
+		log.Printf("Failed to connect to QEMU VNC for session %s (after 5 tries): %v", sessionID, err)
+		return
+	}
+	defer qemuConn.Close()
+
+	// Proxy messages between the two connections
+	errChan := make(chan error, 2)
+	go func() {
+		for {
+			mt, message, err := conn.ReadMessage()
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if err := qemuConn.WriteMessage(mt, message); err != nil {
+				errChan <- err
+				return
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			mt, message, err := qemuConn.ReadMessage()
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if err := conn.WriteMessage(mt, message); err != nil {
+				errChan <- err
+				return
+			}
+		}
+	}()
+
+	<-errChan
 }
 
 // --- Hub and Client implementation ---

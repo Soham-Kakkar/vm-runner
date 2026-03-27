@@ -3,14 +3,16 @@ package service
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"vm-runner/internal/storage"
 	"vm-runner/internal/vm"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -30,15 +32,18 @@ type Session struct {
 	CompletedQuestions map[string]bool
 	StartTime          time.Time
 	WebSocket          chan<- WebSocketMessage
+	outputBuffer       strings.Builder
+	history            []byte
+	historyMu          sync.Mutex
 }
 
 // SessionManager handles the lifecycle of active sessions.
 // For the MVP, it manages only one session at a time.
 type SessionManager struct {
-	mu            sync.RWMutex
-	activeSession *Session
+	mu             sync.RWMutex
+	activeSession  *Session
 	challengeStore *storage.FileStore
-	flagFoundChan chan<- FlagFoundEvent
+	flagFoundChan  chan<- FlagFoundEvent
 }
 
 // NewSessionManager creates a new session manager.
@@ -96,10 +101,9 @@ func (sm *SessionManager) EndSession(sessionID string) error {
 		fmt.Printf("Warning: failed to stop VM for session %s: %v\n", sessionID, err)
 	}
 
-	if sm.activeSession.WebSocket != nil {
-		close(sm.activeSession.WebSocket)
-	}
-	
+	// Clear WebSocket reference; the hub is responsible for closing client send channels.
+	sm.activeSession.WebSocket = nil
+
 	sm.activeSession = nil
 	return nil
 }
@@ -130,9 +134,19 @@ func (sm *SessionManager) RegisterWebSocket(sessionID string, ws chan<- WebSocke
 		return ErrSessionNotFound
 	}
 	sm.activeSession.WebSocket = ws
+
+	// Send current history if any
+	sm.activeSession.historyMu.Lock()
+	if len(sm.activeSession.history) > 0 {
+		ws <- WebSocketMessage{
+			Type:    "vm_output",
+			Payload: string(sm.activeSession.history),
+		}
+	}
+	sm.activeSession.historyMu.Unlock()
+
 	return nil
 }
-
 
 // HandleVMInput sends user input to the VM.
 func (sm *SessionManager) HandleVMInput(sessionID, input string) error {
@@ -160,13 +174,34 @@ func (sm *SessionManager) SubmitAnswer(sessionID, answer string) (bool, string) 
 	return false, ""
 }
 
-
 // monitorVM reads output from the VM and forwards it.
 func (sm *SessionManager) monitorVM(session *Session) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	var batch strings.Builder
+
 	for {
 		select {
-		case output, ok := <-session.VMManager.OutputChan:
+		case <-ticker.C:
+			if batch.Len() > 0 && session.WebSocket != nil {
+				session.WebSocket <- WebSocketMessage{
+					Type:    "vm_output",
+					Payload: batch.String(),
+				}
+				batch.Reset()
+			}
+
+		case outputBytes, ok := <-session.VMManager.OutputChan:
 			if !ok {
+				// Final flush if anything is left in the batch.
+				if batch.Len() > 0 && session.WebSocket != nil {
+					session.WebSocket <- WebSocketMessage{
+						Type:    "vm_output",
+						Payload: batch.String(),
+					}
+				}
+
 				// VM stopped
 				if session.WebSocket != nil {
 					session.WebSocket <- WebSocketMessage{
@@ -178,15 +213,26 @@ func (sm *SessionManager) monitorVM(session *Session) {
 				return
 			}
 
-			//IMPORTANT: send raw output (no forced newline)
-			if session.WebSocket != nil && output != "" {
-				session.WebSocket <- WebSocketMessage{
-					Type:    "vm_output",
-					Payload: output,
-				}
+			// Convert bytes to string and append to batch
+			output := string(outputBytes)
+			batch.WriteString(output)
+
+			// Store in session history for reloads/new clients
+			session.historyMu.Lock()
+			session.history = append(session.history, outputBytes...)
+			// Limit history to last 100KB
+			const maxHistory = 100000
+			if len(session.history) > maxHistory {
+				session.history = session.history[len(session.history)-maxHistory:]
+			}
+			session.historyMu.Unlock()
+
+			// Optional debug: print raw bytes as hex when VM_RUNNER_DEBUG=1
+			if os.Getenv("VM_RUNNER_DEBUG") == "1" {
+				fmt.Printf("[DEBUG] vm output bytes: %x\n", outputBytes)
 			}
 
-			// Check for flags using raw output
+			// Check for flags using raw output (immediately, don't wait for ticker)
 			sm.checkForFlag(session, output)
 
 		case err, ok := <-session.VMManager.ErrorChan:
@@ -208,7 +254,20 @@ func (sm *SessionManager) monitorVM(session *Session) {
 // checkForFlag scans VM output for anything matching flag{...}.
 // If a match is found, it's checked against all incomplete questions.
 func (sm *SessionManager) checkForFlag(session *Session, output string) {
-	matches := flagRegex.FindAllString(output, -1)
+	// Append the new output to the session-specific buffer.
+	session.outputBuffer.WriteString(output)
+
+	// Keep the buffer at a reasonable size for scanning (e.g., last 1000 characters)
+	const maxScanBuffer = 1000
+	currentBuf := session.outputBuffer.String()
+	if len(currentBuf) > maxScanBuffer {
+		newBuf := currentBuf[len(currentBuf)-maxScanBuffer:]
+		session.outputBuffer.Reset()
+		session.outputBuffer.WriteString(newBuf)
+		currentBuf = newBuf
+	}
+
+	matches := flagRegex.FindAllString(currentBuf, -1)
 	if len(matches) == 0 {
 		return
 	}
@@ -216,7 +275,6 @@ func (sm *SessionManager) checkForFlag(session *Session, output string) {
 	for _, match := range matches {
 		for _, q := range session.Challenge.Questions {
 			if !session.CompletedQuestions[q.ID] && match == q.Answer {
-				
 				session.CompletedQuestions[q.ID] = true
 
 				// Notify the handler via channel

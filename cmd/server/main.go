@@ -42,6 +42,7 @@ func main() {
 	mux := http.NewServeMux()
 	httpHandler.RegisterRoutes(mux)
 	mux.HandleFunc("/ws/", wsHandler.ServeWS)
+	mux.HandleFunc("/vnc/", wsHandler.ServeVNC)
 
 	// Serve static files
 	fs := http.FileServer(http.Dir("./web"))

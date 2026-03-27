@@ -24,10 +24,18 @@
         </div>
         <div id="terminal-panel">
             <div id="terminal"></div>
+            <div id="vnc-container" class="hidden">
+                <div id="vnc-screen"></div>
+            </div>
         </div>
+
     </div>
     <script src="https://cdn.jsdelivr.net/npm/xterm@4.15.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
+    <script type="module">
+        import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.3.0/core/rfb.js';
+        window.RFB = RFB;
+    </script>
     <script src="app.js"></script>
 </body>
 </html>

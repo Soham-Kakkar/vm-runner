@@ -5,19 +5,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const questionsContainer = document.getElementById('questions-container');
     const endSessionBtn = document.getElementById('end-session-btn');
     const terminalContainer = document.getElementById('terminal');
+    const vncContainer = document.getElementById('vnc-container');
+    const vncScreen = document.getElementById('vnc-screen');
 
     let term;
     let ws;
+    let rfb;
+    let termListener = null;
     let currentSession = null;
 
     // Initialize Terminal
-    function initTerminal() {
-        term = new Terminal({ cursorBlink: true, theme: { background: '#1a1a1a' } });
+    function initTerminal(container) {
+        const terminal = new Terminal({ cursorBlink: true, theme: { background: '#1a1a1a' } });
         const fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-        term.open(terminalContainer);
+        terminal.loadAddon(fitAddon);
+        terminal.open(container);
         fitAddon.fit();
         window.addEventListener('resize', () => fitAddon.fit());
+        return terminal;
     }
 
     // Fetch and display challenges
@@ -74,12 +79,88 @@ document.addEventListener('DOMContentLoaded', () => {
         sessionChallengeName.textContent = challengeName;
         displayQuestions(sessionData.questions);
         
+        // Destroy existing terminal if any
+        if (term) {
+            if (termListener) {
+                try { termListener.dispose(); } catch (e) {}
+                termListener = null;
+            }
+            term.dispose();
+            terminalContainer.innerHTML = '';
+        }
+
+        // Initialize new terminal for a clean state
+        term = initTerminal(terminalContainer);
+
+        // Highlight active challenge in list
+        document.querySelectorAll('#challenge-list li').forEach(li => {
+            if (li.dataset.challengeId === sessionData.challenge_id) {
+                li.classList.add('active');
+            } else {
+                li.classList.remove('active');
+            }
+        });
+
         // Clear and setup log
         const log = document.getElementById('vm-log');
         if (log) log.value = '';
 
+        if (sessionData.display_type === 'vnc') {
+            terminalContainer.classList.add('hidden');
+            vncContainer.classList.remove('hidden');
+            setupVNC(sessionData.vnc_url);
+        } else {
+            terminalContainer.classList.remove('hidden');
+            vncContainer.classList.add('hidden');
+            if (rfb) {
+                rfb.disconnect();
+                rfb = null;
+            }
+        }
+
         setupWebSocket(sessionData.websocket_url);
         sessionView.classList.remove('hidden');
+    }
+
+    function setupVNC(vncUrl) {
+        if (rfb) {
+            rfb.disconnect();
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${window.location.host}${vncUrl}`;
+        
+        // RFB is loaded via a module script in index.html
+        const initRFB = () => {
+            if (!window.RFB) {
+                setTimeout(initRFB, 100);
+                return;
+            }
+            rfb = new window.RFB(vncScreen, url);
+            rfb.scaleViewport = true;
+            rfb.resizeSession = true;
+
+            rfb.addEventListener('connect', () => {
+                console.log('VNC Connected successfully');
+            });
+            rfb.addEventListener('disconnect', (e) => {
+                console.log('VNC Disconnected', e);
+            });
+            rfb.addEventListener('securityfailure', (e) => {
+                console.error('VNC Security Failure', e);
+            });
+
+            // Handle clipboard from VM
+            rfb.addEventListener('clipboard', (e) => {
+                const text = e.detail.text;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).catch(err => {
+                        console.error('Failed to copy from VM to host clipboard:', err);
+                    });
+                }
+            });
+        };
+        initRFB();
     }
 
     // Display questions
@@ -144,7 +225,12 @@ document.addEventListener('DOMContentLoaded', () => {
         ws = new WebSocket(`${protocol}//${window.location.host}${wsUrl}`);
 
         ws.onopen = () => {
-            term.onData(data => {
+            // ensure we only have one onData listener
+            if (termListener) {
+                try { termListener.dispose(); } catch (e) {}
+                termListener = null;
+            }
+            termListener = term.onData(data => {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'input', payload: data }));
                 }
@@ -155,11 +241,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const msg = JSON.parse(event.data);
             switch (msg.type) {
                 case 'vm_output':
-                    let output = msg.payload;
-                    if (!output.endsWith('\n') && !output.endsWith('\r')) {
-                        output += '\r\n';
-                    }
-
+                    const output = msg.payload;
                     term.write(output);
                     term.scrollToBottom();
 
@@ -167,7 +249,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (log) {
                         const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
                         const cleanOutput = msg.payload.replace(ansiRegex, '');
-                        log.value += cleanOutput;
+                        
+                        // Limit log size to ~10,000 chars for performance
+                        const newLog = (log.value + cleanOutput).slice(-10000);
+                        log.value = newLog;
                         log.scrollTop = log.scrollHeight;
                     }
                     break;
@@ -189,25 +274,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
         ws.onclose = () => {
             term.write(`\n\r[WebSocket connection closed]\n\r`);
+            if (termListener) {
+                try { termListener.dispose(); } catch (e) {}
+                termListener = null;
+            }
         };
     }
     
     // End the current session
     function endSession() {
         if (!currentSession) return;
-    
-        if (ws) ws.close();
+        // Tell server to end the session, then cleanup client-side state.
+        fetch(`/api/sessions/${currentSession.session_id}/end`, { method: 'POST' }).catch(() => {} ).finally(() => {
+            if (ws) ws.close();
+            if (rfb) {
+                rfb.disconnect();
+                rfb = null;
+            }
+
+            // Remove active highlight from challenge list
+            document.querySelectorAll('#challenge-list li').forEach(li => li.classList.remove('active'));
+
+            if (term) {
+                if (termListener) {
+                    try { termListener.dispose(); } catch (e) {}
+                    termListener = null;
+                }
+                term.dispose();
+                term = null;
+                terminalContainer.innerHTML = '';
+            }
+
+            currentSession = null;
+            sessionView.classList.add('hidden');
+        });
         
-        currentSession = null;
-        term.clear();
-        sessionView.classList.add('hidden');
-        
-        // Optionally, could add a DELETE /api/sessions/:id call here
+        // Session end requested on server as well.
     }
 
     endSessionBtn.addEventListener('click', endSession);
 
     // Initial load
-    initTerminal();
     loadChallenges();
 });

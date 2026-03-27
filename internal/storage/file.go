@@ -11,11 +11,11 @@ import (
 // --- Data Models ---
 
 type Challenge struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
-	Description  string       `json:"description"`
-	VMConfig     VMConfig     `json:"vm_config"`
-	Questions    []Question   `json:"questions"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	VMConfig    VMConfig   `json:"vm_config"`
+	Questions   []Question `json:"questions"`
 }
 
 type VMConfig struct {
@@ -25,14 +25,15 @@ type VMConfig struct {
 	CPUs           int    `json:"cpus"`
 	Architecture   string `json:"architecture"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
+	DisplayType    string `json:"display_type"` // "terminal" or "vnc"
 }
 
 type Question struct {
-	ID      string `json:"id"`
-	Order   int    `json:"order"`
-	Text    string `json:"text"`
-	Answer  string `json:"answer"`
-	Hint    string `json:"hint,omitempty"`
+	ID     string `json:"id"`
+	Order  int    `json:"order"`
+	Text   string `json:"text"`
+	Answer string `json:"answer"`
+	Hint   string `json:"hint,omitempty"`
 }
 
 // --- File-based Storage ---
