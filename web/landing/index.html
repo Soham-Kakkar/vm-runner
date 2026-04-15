@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VM Runner - Interactive CTF Platform</title>
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body class="landing-shell">
+  <header style="padding: 24px 40px; border-bottom: 1px solid var(--border-default); display: flex; justify-content: space-between; align-items: center; background: var(--bg-sidebar); position: sticky; top: 0; z-index: 10;">
+    <div class="brand">
+      <div class="brand-mark">VM</div>
+      <h1 style="font-size: 20px;">VM Runner</h1>
+    </div>
+    <div class="btn-group">
+      <a href="/login/" class="btn">Sign In</a>
+      <a href="/register/" class="btn primary">Get Started</a>
+    </div>
+  </header>
+
+  <main style="flex-grow: 1;">
+    <section class="hero">
+      <div class="container">
+        <span class="pill" style="margin-bottom: 24px; color: var(--color-accent); border-color: var(--color-accent); padding: 4px 12px;">v2.0 Professional Edition</span>
+        <h1>Interactive CTF Environments</h1>
+        <p>Deploy high-performance, isolated VMs in seconds. Full terminal and GUI access directly from your browser with deterministic HMAC validation.</p>
+        <div class="btn-group">
+          <a href="/register/" class="btn primary btn-large">Start Hacking Now</a>
+          <a href="/login/" class="btn btn-large">View Dashboard</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="container" style="padding: 80px 20px;">
+      <div class="grid">
+        <div class="card">
+          <div style="font-size: 32px;">🚀</div>
+          <h3 style="font-size: 20px;">Instant Deployment</h3>
+          <p>QEMU-backed sessions with custom qcow2 overlays. Your changes are isolated and cleaned up automatically.</p>
+        </div>
+        <div class="card">
+          <div style="font-size: 32px;">🖥️</div>
+          <h3 style="font-size: 20px;">Dual Mode Display</h3>
+          <p>Seamlessly switch between high-speed serial terminals and full VNC graphical desktops with perfect mouse sync.</p>
+        </div>
+        <div class="card">
+          <div style="font-size: 32px;">🔐</div>
+          <h3 style="font-size: 20px;">Seed-based Flags</h3>
+          <p>Dynamic HMAC flag generation makes each session unique, preventing flag sharing and ensuring fair play.</p>
+        </div>
+      </div>
+    </section>
+
+    <footer style="text-align: center; padding: 60px 20px; border-top: 1px solid var(--border-default); color: var(--text-dim); background: var(--bg-sidebar);">
+      <div class="container">
+        <div class="brand" style="justify-content: center; margin-bottom: 16px;">
+          <div class="brand-mark">VM</div>
+          <span style="font-weight: 600;">VM Runner</span>
+        </div>
+        <p>&copy; 2026 VM Runner Platform. All rights reserved.</p>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    if (localStorage.getItem('vmrunner_user')) {
+      window.location.href = '/';
+    }
+  </script>
+</body>
+</html>

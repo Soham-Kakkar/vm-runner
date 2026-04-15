@@ -1,290 +1,575 @@
 package service
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
-	"regexp"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"vm-runner/internal/storage"
 	"vm-runner/internal/vm"
-
-	"github.com/google/uuid"
 )
 
 var (
 	ErrSessionExists   = errors.New("a session is already active")
 	ErrSessionNotFound = errors.New("session not found")
+	ErrSessionClosed   = errors.New("session is not active")
 )
 
-// Define the flag regex globally for efficiency.
-// It matches "flag{" followed by any character that is not a bracket, ending with "}".
-var flagRegex = regexp.MustCompile(`flag\{[^{}]*\}`)
-
-// Session represents an active challenge session.
-type Session struct {
-	ID                 string
-	Challenge          storage.Challenge
-	VMManager          *vm.QEMUManager
-	CompletedQuestions map[string]bool
-	StartTime          time.Time
-	WebSocket          chan<- WebSocketMessage
-	outputBuffer       strings.Builder
-	history            []byte
-	historyMu          sync.Mutex
+type sessionRecord struct {
+	session      *storage.Session
+	vmManager    *vm.QEMUManager
+	webSocket    chan<- WebSocketMessage
+	history      []byte
+	historyMu    sync.Mutex
+	outputBuffer strings.Builder
 }
 
-// SessionManager handles the lifecycle of active sessions.
-// For the MVP, it manages only one session at a time.
 type SessionManager struct {
 	mu             sync.RWMutex
-	activeSession  *Session
+	sessions       map[string]*sessionRecord
 	challengeStore *storage.FileStore
 	flagFoundChan  chan<- FlagFoundEvent
+	secret         []byte
+	runtimeBase    string
 }
 
-// NewSessionManager creates a new session manager.
 func NewSessionManager(challengeStore *storage.FileStore, flagFoundChan chan FlagFoundEvent) *SessionManager {
-	return &SessionManager{
+	secret := []byte(os.Getenv("VMRUNNER_SECRET"))
+	if len(secret) == 0 {
+		secret = []byte("dev-seed")
+	}
+	runtimeBase := filepath.Join("data", "runtime")
+	_ = os.MkdirAll(runtimeBase, 0o755)
+	sm := &SessionManager{
+		sessions:       make(map[string]*sessionRecord),
 		challengeStore: challengeStore,
 		flagFoundChan:  flagFoundChan,
+		secret:         secret,
+		runtimeBase:    runtimeBase,
+	}
+
+	// Load any existing session metadata from the runtime directory so UI can
+	// show persisted sessions after server restarts. These sessions do not have
+	// an active vmManager attached (VM processes are not resumed automatically).
+	_ = sm.loadPersistedSessions()
+
+	// Start inactivity watcher to close idle sessions.
+	go sm.inactivityWatcher()
+
+	return sm
+}
+
+func (sm *SessionManager) persistedSessionPath(sessionID string) string {
+	return filepath.Join(sm.runtimeBase, sessionID, "session.json")
+}
+
+func (sm *SessionManager) saveSessionToDisk(s *storage.Session) error {
+	path := sm.persistedSessionPath(s.ID)
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func (sm *SessionManager) deleteSessionFromDisk(sessionID string) error {
+	path := sm.persistedSessionPath(sessionID)
+	if _, err := os.Stat(path); err == nil {
+		return os.Remove(path)
+	}
+	return nil
+}
+
+func (sm *SessionManager) loadPersistedSessions() error {
+	entries, err := os.ReadDir(sm.runtimeBase)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		path := filepath.Join(sm.runtimeBase, id, "session.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var s storage.Session
+		if err := json.Unmarshal(data, &s); err != nil {
+			continue
+		}
+		// Rehydrate into in-memory map without a vmManager.
+		sm.sessions[s.ID] = &sessionRecord{session: &s}
+		// Do not start monitorVM because there's no vmManager to read output from.
+	}
+	return nil
+}
+
+// inactivityWatcher closes sessions that have been idle past the inactivity threshold.
+func (sm *SessionManager) inactivityWatcher() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		sm.mu.RLock()
+		ids := make([]string, 0, len(sm.sessions))
+		for id := range sm.sessions {
+			ids = append(ids, id)
+		}
+		sm.mu.RUnlock()
+		now := time.Now().UTC()
+		for _, id := range ids {
+			record, err := sm.getRecord(id)
+			if err != nil {
+				continue
+			}
+			if record.session.Status != storage.SessionStatusActive {
+				continue
+			}
+			last := record.session.LastActivity
+			if last == nil {
+				// fall back to CreatedAt
+				t := record.session.CreatedAt
+				last = &t
+			}
+			if now.Sub(*last) > 10*time.Minute {
+				log.Printf("ending session %s due to inactivity", id)
+				_ = sm.EndSession(id)
+			}
+		}
 	}
 }
 
-// StartSession creates and starts a new challenge session.
-func (sm *SessionManager) StartSession(challengeID string) (*Session, error) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+func (sm *SessionManager) StartSession(challengeID string) (*storage.Session, error) {
+	return sm.StartSessionWithID(challengeID, "")
+}
 
-	if sm.activeSession != nil {
-		return nil, ErrSessionExists
-	}
-
+// StartSessionWithID starts a session using the provided sessionID.
+// If sessionID is empty a new random UUID will be generated.
+func (sm *SessionManager) StartSessionWithID(challengeID, sessionID string) (*storage.Session, error) {
 	challenge, err := sm.challengeStore.GetChallenge(challengeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get challenge: %w", err)
 	}
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	} else {
+		// If a session with this ID exists and is active, return exists error
+		sm.mu.RLock()
+		if rec, ok := sm.sessions[sessionID]; ok && rec.session != nil && rec.session.Status == storage.SessionStatusActive {
+			sm.mu.RUnlock()
+			return nil, ErrSessionExists
+		}
+		sm.mu.RUnlock()
+	}
+	seed := sm.deriveSeed(sessionID)
+	runtimePath := filepath.Join(sm.runtimeBase, sessionID)
+	if err := os.MkdirAll(runtimePath, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create runtime directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimePath, "seed"), []byte(seed), 0o400); err != nil {
+		return nil, fmt.Errorf("failed to write session seed: %w", err)
+	}
 
-	vmManager := vm.NewQEMUManager(challenge.VMConfig)
+	// Prefer the CTF-level VMConfig when the challenge does not specify its own image.
+	cfg := challenge.VMConfig
+	if cfg.ImagePath == "" {
+		if ctf, err := sm.challengeStore.GetCTF(challenge.CTFID); err == nil {
+			if ctf.VMConfig.ImagePath != "" {
+				cfg = ctf.VMConfig
+			}
+		}
+	}
+	vmManager := vm.NewQEMUManager(cfg, runtimePath)
 	if err := vmManager.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start vm: %w", err)
 	}
 
-	sessionID := uuid.New().String()
-	session := &Session{
-		ID:                 sessionID,
-		Challenge:          challenge,
-		VMManager:          vmManager,
-		CompletedQuestions: make(map[string]bool),
-		StartTime:          time.Now(),
+	now := time.Now().UTC()
+	expiresAt := now.Add(time.Duration(cfg.TimeoutSeconds) * time.Second)
+	if cfg.TimeoutSeconds <= 0 {
+		expiresAt = now.Add(30 * time.Minute)
 	}
 
-	sm.activeSession = session
-	go sm.monitorVM(session)
+	session := &storage.Session{
+		ID:           sessionID,
+		ChallengeID:  challenge.ID,
+		RuntimePath:  runtimePath,
+		Seed:         seed,
+		CreatedAt:    now,
+		LastActivity: &now,
+		ExpiresAt:    expiresAt,
+		Status:       storage.SessionStatusActive,
+		Challenge:    challenge,
+	}
 
-	return session, nil
+	record := &sessionRecord{
+		session:   session,
+		vmManager: vmManager,
+	}
+
+	sm.mu.Lock()
+	sm.sessions[sessionID] = record
+	sm.mu.Unlock()
+
+	// Persist session metadata so it survives server restarts.
+	if err := sm.saveSessionToDisk(session); err != nil {
+		log.Printf("warning: failed to persist session %s: %v", session.ID, err)
+	}
+
+	go sm.monitorVM(sessionID)
+	go sm.expireSession(sessionID, expiresAt)
+	return sm.copySession(sessionID)
 }
 
-// EndSession stops and cleans up the active session.
 func (sm *SessionManager) EndSession(sessionID string) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if sm.activeSession == nil || sm.activeSession.ID != sessionID {
-		return ErrSessionNotFound
-	}
-
-	if err := sm.activeSession.VMManager.Stop(); err != nil {
-		fmt.Printf("Warning: failed to stop VM for session %s: %v\n", sessionID, err)
-	}
-
-	// Clear WebSocket reference; the hub is responsible for closing client send channels.
-	sm.activeSession.WebSocket = nil
-
-	sm.activeSession = nil
-	return nil
-}
-
-// GetSession retrieves the currently active session.
-func (sm *SessionManager) GetSession(sessionID string) (*Session, error) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	if sm.activeSession != nil && sm.activeSession.ID == sessionID {
-		return sm.activeSession, nil
-	}
-	return nil, ErrSessionNotFound
-}
-
-// GetActiveSession returns the currently active session if any.
-func (sm *SessionManager) GetActiveSession() *Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.activeSession
-}
-
-// RegisterWebSocket associates a WebSocket connection with the session.
-func (sm *SessionManager) RegisterWebSocket(sessionID string, ws chan<- WebSocketMessage) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	if sm.activeSession == nil || sm.activeSession.ID != sessionID {
-		return ErrSessionNotFound
-	}
-	sm.activeSession.WebSocket = ws
-
-	// Send current history if any
-	sm.activeSession.historyMu.Lock()
-	if len(sm.activeSession.history) > 0 {
-		ws <- WebSocketMessage{
-			Type:    "vm_output",
-			Payload: string(sm.activeSession.history),
-		}
-	}
-	sm.activeSession.historyMu.Unlock()
-
-	return nil
-}
-
-// HandleVMInput sends user input to the VM.
-func (sm *SessionManager) HandleVMInput(sessionID, input string) error {
-	session, err := sm.GetSession(sessionID)
+	record, err := sm.getRecord(sessionID)
 	if err != nil {
 		return err
 	}
-	_, err = session.VMManager.SendInput(input)
-	return err
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if record.session.Status != storage.SessionStatusActive {
+		return ErrSessionClosed
+	}
+	if record.vmManager != nil {
+		if err := record.vmManager.Stop(); err != nil {
+			log.Printf("warning: failed to stop vm for session %s: %v", sessionID, err)
+		}
+	} else {
+		log.Printf("no vmManager for session %s; marking stopped", sessionID)
+	}
+	now := time.Now().UTC()
+	record.session.Status = storage.SessionStatusStopped
+	record.session.StoppedAt = &now
+	record.webSocket = nil
+
+	// Remove persisted session metadata
+	if err := sm.deleteSessionFromDisk(sessionID); err != nil {
+		log.Printf("warning: failed to delete session file for %s: %v", sessionID, err)
+	}
+	return nil
 }
 
-// SubmitAnswer checks a user-submitted answer.
-func (sm *SessionManager) SubmitAnswer(sessionID, answer string) (bool, string) {
-	session, err := sm.GetSession(sessionID)
-	if err != nil {
-		return false, ""
-	}
+func (sm *SessionManager) GetSession(sessionID string) (*storage.Session, error) {
+	return sm.copySession(sessionID)
+}
 
-	for _, q := range session.Challenge.Questions {
-		if !session.CompletedQuestions[q.ID] && strings.TrimSpace(answer) == q.Answer {
-			session.CompletedQuestions[q.ID] = true
-			return true, q.ID
+func (sm *SessionManager) GetActiveSession() *storage.Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	var latest *storage.Session
+	for _, record := range sm.sessions {
+		if record.session.Status == storage.SessionStatusActive {
+			if latest == nil || record.session.CreatedAt.After(latest.CreatedAt) {
+				copy := *record.session
+				latest = &copy
+			}
 		}
 	}
-	return false, ""
+	return latest
 }
 
-// monitorVM reads output from the VM and forwards it.
-func (sm *SessionManager) monitorVM(session *Session) {
+func (sm *SessionManager) RegisterWebSocket(sessionID string, ws chan<- WebSocketMessage) error {
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
+		return err
+	}
+
+	sm.mu.Lock()
+	record.webSocket = ws
+	log.Printf("websocket registered for session %s", sessionID)
+	now := time.Now().UTC()
+	record.session.LastActivity = &now
+	if err := sm.saveSessionToDisk(record.session); err != nil {
+		log.Printf("warning: failed to update session last_activity for %s: %v", sessionID, err)
+	}
+	history := append([]byte(nil), record.history...)
+	sm.mu.Unlock()
+
+	if len(history) > 0 {
+		ws <- WebSocketMessage{Type: "vm_output", Payload: string(history)}
+	}
+	return nil
+}
+
+func (sm *SessionManager) HandleVMInput(sessionID, input string) error {
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
+		return err
+	}
+	if record.session.Status != storage.SessionStatusActive {
+		return ErrSessionClosed
+	}
+	_, err = record.vmManager.SendInput(input)
+	if err != nil {
+		log.Printf("failed to send input to vm for session %s: %v", sessionID, err)
+		return err
+	}
+	now := time.Now().UTC()
+	record.session.LastActivity = &now
+	if err := sm.saveSessionToDisk(record.session); err != nil {
+		log.Printf("warning: failed to update session last_activity for %s: %v", sessionID, err)
+	}
+	// log.Printf("wrote %d bytes to vm for session %s", n, sessionID)
+	return nil
+}
+
+func (sm *SessionManager) SubmitAnswer(sessionID, answer string) (bool, *storage.Submission, error) {
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
+		return false, nil, err
+	}
+	if record.session.Status != storage.SessionStatusActive {
+		return false, nil, ErrSessionClosed
+	}
+
+	correct, err := sm.validateAnswer(record.session, strings.TrimSpace(answer))
+	if err != nil {
+		return false, nil, err
+	}
+
+	submission := &storage.Submission{
+		ID:          uuid.NewString(),
+		SessionID:   record.session.ID,
+		ChallengeID: record.session.ChallengeID,
+		Answer:      strings.TrimSpace(answer),
+		IsCorrect:   correct,
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	sm.mu.Lock()
+	record.session.Submissions = append(record.session.Submissions, *submission)
+	if correct && record.session.SolvedAt == nil {
+		now := submission.CreatedAt
+		record.session.SolvedAt = &now
+	}
+	sm.mu.Unlock()
+
+	if correct && sm.flagFoundChan != nil {
+		sm.flagFoundChan <- FlagFoundEvent{SessionID: record.session.ID, QuestionID: record.session.Challenge.ID}
+	}
+	if correct {
+		record.historyMu.Lock()
+		ws := record.webSocket
+		record.historyMu.Unlock()
+		if ws != nil {
+			ws <- WebSocketMessage{Type: "flag_found", Payload: map[string]string{"challenge_id": record.session.Challenge.ID}}
+		}
+	}
+
+	return correct, submission, nil
+}
+
+func (sm *SessionManager) deriveSeed(sessionID string) string {
+	mac := hmac.New(sha256.New, sm.secret)
+	mac.Write([]byte(sessionID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (sm *SessionManager) validateAnswer(session *storage.Session, answer string) (bool, error) {
+	switch strings.ToLower(session.Challenge.Validator) {
+	case "", storage.ChallengeValidatorStatic:
+		return answer == session.Challenge.Flag, nil
+	case storage.ChallengeValidatorHMAC:
+		return answer == sm.expectedHMACFlag(session), nil
+	default:
+		return false, fmt.Errorf("unsupported validator %q", session.Challenge.Validator)
+	}
+}
+
+func (sm *SessionManager) expectedHMACFlag(session *storage.Session) string {
+	seedBytes, err := hex.DecodeString(session.Seed)
+	if err != nil {
+		return ""
+	}
+	questionNo := session.Challenge.QuestionNo
+	if questionNo <= 0 {
+		questionNo = 1
+	}
+	mac := hmac.New(sha256.New, seedBytes)
+	mac.Write([]byte(fmt.Sprintf("%d", questionNo)))
+	h := hex.EncodeToString(mac.Sum(nil))
+	template := session.Challenge.Template
+	if template == "" {
+		template = "flag{<hmac>}"
+	}
+	return strings.ReplaceAll(template, "<hmac>", h[:5])
+}
+
+func (sm *SessionManager) monitorVM(sessionID string) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
 	var batch strings.Builder
-
 	for {
+		record, err := sm.getRecord(sessionID)
+		if err != nil {
+			return
+		}
+
 		select {
 		case <-ticker.C:
-			if batch.Len() > 0 && session.WebSocket != nil {
-				session.WebSocket <- WebSocketMessage{
-					Type:    "vm_output",
-					Payload: batch.String(),
-				}
+			if batch.Len() > 0 {
+				sm.pushOutput(record, batch.String())
 				batch.Reset()
 			}
-
-		case outputBytes, ok := <-session.VMManager.OutputChan:
+		case outputBytes, ok := <-record.vmManager.OutputChan:
 			if !ok {
-				// Final flush if anything is left in the batch.
-				if batch.Len() > 0 && session.WebSocket != nil {
-					session.WebSocket <- WebSocketMessage{
-						Type:    "vm_output",
-						Payload: batch.String(),
-					}
+				if batch.Len() > 0 {
+					sm.pushOutput(record, batch.String())
 				}
-
-				// VM stopped
-				if session.WebSocket != nil {
-					session.WebSocket <- WebSocketMessage{
-						Type:    "error",
-						Payload: "VM stopped unexpectedly",
-					}
-				}
-				sm.EndSession(session.ID)
+				sm.signalSessionError(record, "VM stopped unexpectedly")
+				_ = sm.EndSession(sessionID)
 				return
 			}
-
-			// Convert bytes to string and append to batch
 			output := string(outputBytes)
 			batch.WriteString(output)
-
-			// Store in session history for reloads/new clients
-			session.historyMu.Lock()
-			session.history = append(session.history, outputBytes...)
-			// Limit history to last 100KB
-			const maxHistory = 100000
-			if len(session.history) > maxHistory {
-				session.history = session.history[len(session.history)-maxHistory:]
-			}
-			session.historyMu.Unlock()
-
-			// Optional debug: print raw bytes as hex when VM_RUNNER_DEBUG=1
-			if os.Getenv("VM_RUNNER_DEBUG") == "1" {
-				fmt.Printf("[DEBUG] vm output bytes: %x\n", outputBytes)
-			}
-
-			// Check for flags using raw output (immediately, don't wait for ticker)
-			sm.checkForFlag(session, output)
-
-		case err, ok := <-session.VMManager.ErrorChan:
+			sm.appendHistory(record, outputBytes)
+			sm.checkForFlag(record, output)
+		case err, ok := <-record.vmManager.ErrorChan:
 			if ok && err != nil {
-				if session.WebSocket != nil {
-					session.WebSocket <- WebSocketMessage{
-						Type:    "error",
-						Payload: err.Error(),
-					}
-				}
+				sm.signalSessionError(record, err.Error())
 			}
-
-			sm.EndSession(session.ID)
+			_ = sm.EndSession(sessionID)
 			return
 		}
 	}
 }
 
-// checkForFlag scans VM output for anything matching flag{...}.
-// If a match is found, it's checked against all incomplete questions.
-func (sm *SessionManager) checkForFlag(session *Session, output string) {
-	// Append the new output to the session-specific buffer.
-	session.outputBuffer.WriteString(output)
-
-	// Keep the buffer at a reasonable size for scanning (e.g., last 1000 characters)
-	const maxScanBuffer = 1000
-	currentBuf := session.outputBuffer.String()
-	if len(currentBuf) > maxScanBuffer {
-		newBuf := currentBuf[len(currentBuf)-maxScanBuffer:]
-		session.outputBuffer.Reset()
-		session.outputBuffer.WriteString(newBuf)
-		currentBuf = newBuf
-	}
-
-	matches := flagRegex.FindAllString(currentBuf, -1)
-	if len(matches) == 0 {
+func (sm *SessionManager) expireSession(sessionID string, expiresAt time.Time) {
+	time.Sleep(time.Until(expiresAt))
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
 		return
 	}
-
-	for _, match := range matches {
-		for _, q := range session.Challenge.Questions {
-			if !session.CompletedQuestions[q.ID] && match == q.Answer {
-				session.CompletedQuestions[q.ID] = true
-
-				// Notify the handler via channel
-				if sm.flagFoundChan != nil {
-					sm.flagFoundChan <- FlagFoundEvent{
-						SessionID:  session.ID,
-						QuestionID: q.ID,
-					}
-				}
-			}
-		}
+	sm.mu.Lock()
+	if record.session.Status == storage.SessionStatusActive {
+		now := time.Now().UTC()
+		record.session.Status = storage.SessionStatusExpired
+		record.session.StoppedAt = &now
+		_ = record.vmManager.Stop()
 	}
+	sm.mu.Unlock()
+}
+
+func (sm *SessionManager) appendHistory(record *sessionRecord, outputBytes []byte) {
+	record.historyMu.Lock()
+	defer record.historyMu.Unlock()
+	record.history = append(record.history, outputBytes...)
+	const maxHistory = 100000
+	if len(record.history) > maxHistory {
+		record.history = record.history[len(record.history)-maxHistory:]
+	}
+}
+
+func (sm *SessionManager) pushOutput(record *sessionRecord, output string) {
+	record.historyMu.Lock()
+	ws := record.webSocket
+	record.historyMu.Unlock()
+	if ws == nil || output == "" {
+		if ws == nil {
+			log.Printf("no websocket for session %s; dropping %d bytes of output", record.session.ID, len(output))
+		}
+		return
+	}
+	// Send output to websocket channel and log size.
+	ws <- WebSocketMessage{Type: "vm_output", Payload: output}
+	// log.Printf("pushed %d bytes of vm_output to session %s websocket", len(output), record.session.ID)
+
+	// Update last activity when we push output to a connected client.
+	now := time.Now().UTC()
+	record.session.LastActivity = &now
+	if err := sm.saveSessionToDisk(record.session); err != nil {
+		log.Printf("warning: failed to update session last_activity for %s: %v", record.session.ID, err)
+	}
+}
+
+func (sm *SessionManager) signalSessionError(record *sessionRecord, message string) {
+	record.historyMu.Lock()
+	ws := record.webSocket
+	record.historyMu.Unlock()
+	if ws != nil {
+		ws <- WebSocketMessage{Type: "error", Payload: message}
+	}
+}
+
+func (sm *SessionManager) checkForFlag(record *sessionRecord, output string) {
+	record.outputBuffer.WriteString(output)
+	const maxScanBuffer = 2000 // slightly larger to accommodate longer flags
+	currentBuf := record.outputBuffer.String()
+	if len(currentBuf) > maxScanBuffer {
+		trimmed := currentBuf[len(currentBuf)-maxScanBuffer:]
+		record.outputBuffer.Reset()
+		record.outputBuffer.WriteString(trimmed)
+		currentBuf = trimmed
+	}
+
+	var expected string
+	if record.session.Challenge.Validator == "" || record.session.Challenge.Validator == storage.ChallengeValidatorStatic {
+		expected = record.session.Challenge.Flag
+	} else if record.session.Challenge.Validator == storage.ChallengeValidatorHMAC {
+		expected = sm.expectedHMACFlag(record.session)
+	}
+
+	if expected != "" && strings.Contains(currentBuf, expected) {
+		if sm.flagFoundChan != nil {
+			sm.flagFoundChan <- FlagFoundEvent{SessionID: record.session.ID, QuestionID: record.session.Challenge.ID}
+		}
+		// Also send to websocket if connected
+		record.historyMu.Lock()
+		ws := record.webSocket
+		record.historyMu.Unlock()
+		if ws != nil {
+			ws <- WebSocketMessage{Type: "flag_found", Payload: map[string]string{"challenge_id": record.session.Challenge.ID}}
+		}
+		log.Printf("detected expected flag in session %s output", record.session.ID)
+	}
+}
+
+func (sm *SessionManager) getRecord(sessionID string) (*sessionRecord, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	record, ok := sm.sessions[sessionID]
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	return record, nil
+}
+
+func (sm *SessionManager) copySession(sessionID string) (*storage.Session, error) {
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	copy := *record.session
+	copy.Submissions = append([]storage.Submission(nil), record.session.Submissions...)
+	return &copy, nil
+}
+
+// GetVNCPort returns the websocket port the QEMU instance is listening on for VNC proxying.
+// Returns 0 if the VM was not configured for VNC or port is unknown.
+func (sm *SessionManager) GetVNCPort(sessionID string) (int, error) {
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
+		return 0, err
+	}
+	if record.vmManager == nil {
+		return 0, nil
+	}
+	return record.vmManager.VNCPort, nil
 }

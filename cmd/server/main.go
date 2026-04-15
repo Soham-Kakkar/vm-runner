@@ -3,53 +3,63 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 
-	"vm-runner/internal/handlers"
+	handler "vm-runner/internal/handlers"
 	"vm-runner/internal/service"
 	"vm-runner/internal/storage"
 )
 
 func main() {
-	// Configuration (for now, hardcoded path)
-	challengeStore := storage.NewFileStore("./data/challenges")
+	dataDir := os.Getenv("VMRUNNER_DATA_DIR")
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+	_ = os.MkdirAll(filepath.Join(dataDir, "runtime"), 0o755)
+	challengeStore := storage.NewFileStore(dataDir)
 
-	// Create a channel for flag found events
 	flagFoundChan := make(chan service.FlagFoundEvent, 10)
-
-	// Services
 	sessionManager := service.NewSessionManager(challengeStore, flagFoundChan)
-
-	// Handlers
 	httpHandler := handler.NewHTTPHandler(challengeStore, sessionManager)
 	wsHandler := handler.NewWebSocketHandler(sessionManager)
 
-	// Listen for flag found events and notify the appropriate WebSocket client
 	go func() {
 		for event := range flagFoundChan {
-			session, err := sessionManager.GetSession(event.SessionID)
-			if err == nil && session.WebSocket != nil {
-				session.WebSocket <- service.WebSocketMessage{
-					Type: "flag_found",
-					Payload: map[string]string{
-						"question_id": event.QuestionID,
-					},
-				}
-			}
+			log.Printf("submission event received: session=%s challenge=%s", event.SessionID, event.QuestionID)
 		}
 	}()
 
-	// Register routes
 	mux := http.NewServeMux()
 	httpHandler.RegisterRoutes(mux)
 	mux.HandleFunc("/ws/", wsHandler.ServeWS)
+	mux.HandleFunc("/ws/session/", wsHandler.ServeWS)
 	mux.HandleFunc("/vnc/", wsHandler.ServeVNC)
+	mux.HandleFunc("/vnc/session/", wsHandler.ServeVNC)
 
-	// Serve static files
 	fs := http.FileServer(http.Dir("./web"))
 	mux.Handle("/", fs)
-
+	// Wrap the mux with a simple CORS middleware to allow browser clients
+	// (useful during development when frontend may be served from a different origin).
+	handler := corsMiddleware(mux)
 	log.Println("Starting server on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := http.ListenAndServe(":8080", handler); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// corsMiddleware adds permissive CORS headers for development and handles
+// OPTIONS preflight requests. For production, restrict the allowed origin.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// TODO: tighten this in production to a specific origin
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

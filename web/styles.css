@@ -1,120 +1,190 @@
-body, html {
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    font-family: sans-serif;
-    background-color: #1a1a1a;
-    color: #f0f0f0;
+:root {
+  --bg-main: #0a0c10;
+  --bg-sidebar: #010409;
+  --bg-card: #161b22;
+  --bg-input: #0d1117;
+  --border-default: #30363d;
+  --border-focus: #1f6feb;
+  
+  --text-main: #e6edf3;
+  --text-dim: #848d97;
+  --text-link: #4493f8;
+  
+  --color-primary: #238636;
+  --color-primary-hover: #2ea043;
+  --color-accent: #1f6feb;
+  --color-danger: #f85149;
+  --color-warning: #d29922;
+  
+  --shadow-sm: 0 1px 0 rgba(1,4,9,0.04);
+  --radius-md: 6px;
+  --radius-lg: 12px;
+  
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
-#container {
-    display: flex;
-    height: 100vh;
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
-#challenge-panel {
-    width: 30%;
-    padding: 20px;
-    border-right: 1px solid #444;
-    overflow-y: auto;
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* Prevent body scroll, use workspace scroll */
 }
 
-#terminal-panel {
-    width: 70%;
-    height: 100%;
+h1, h2, h3, h4 { font-weight: 600; }
+
+a { color: var(--text-link); text-decoration: none; transition: color 0.2s; }
+a:hover { text-decoration: underline; }
+
+button, .btn {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  padding: 6px 16px;
+  transition: all 0.2s cubic-bezier(0.3, 0, 0.5, 1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-decoration: none !important;
 }
 
-#terminal {
-    width: 100%;
-    height: 100%;
+button:hover, .btn:hover { background-color: #21262d; border-color: #8b949e; }
+button:active, .btn:active { background-color: #30363d; }
+
+button.primary, .btn.primary {
+  background-color: var(--color-primary);
+  border-color: rgba(240, 246, 252, 0.1);
+  color: #ffffff;
+}
+button.primary:hover, .btn.primary:hover { background-color: var(--color-primary-hover); }
+
+button.danger, .btn.danger { color: var(--color-danger); }
+button.danger:hover, .btn.danger:hover { background-color: var(--color-danger); color: #fff; border-color: var(--color-danger); }
+
+input[type="text"], input[type="password"], textarea, select {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 14px;
+  padding: 6px 12px;
+  width: 100%;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-#vnc-container {
-    width: 100%;
-    height: 100%;
-    background-color: #000;
+input:focus {
+  border-color: var(--border-focus);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.25);
 }
 
-#vnc-screen {
-    width: 100%;
-    height: 100%;
+.shell { display: flex; height: 100vh; width: 100vw; }
+
+.sidebar {
+  background-color: var(--bg-sidebar);
+  border-right: 1px solid var(--border-default);
+  width: 260px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-#vnc-screen canvas {
-    /* These will be managed by noVNC but we provide defaults */
-    max-width: 100%;
-    max-height: 100%;
+.sidebar-header { padding: 24px; border-bottom: 1px solid var(--border-default); }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+  background: linear-gradient(135deg, #1f6feb 0%, #4493f8 100%);
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 800;
+  padding: 6px 10px;
+  box-shadow: 0 4px 12px rgba(31, 111, 235, 0.3);
 }
 
-#vnc-screen canvas {
-    max-width: 100%;
-    max-height: 100%;
-    display: block;
-    margin: 0 auto;
+.nav { padding: 12px; flex-grow: 1; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.nav-item {
+  color: var(--text-main);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: background 0.2s;
+  cursor: pointer;
+}
+.nav-item:hover { background-color: rgba(177, 186, 196, 0.12); text-decoration: none; }
+.nav-item.active { background-color: rgba(31, 111, 235, 0.1); color: var(--text-link); font-weight: 600; }
+
+.workspace { flex-grow: 1; overflow-y: auto; padding: 40px; display: flex; flex-direction: column; }
+.container { max-width: 1100px; margin: 0 auto; width: 100%; }
+
+.page-header { margin-bottom: 32px; display: flex; justify-content: space-between; align-items: center; }
+.page-title h2 { font-size: 28px; letter-spacing: -0.5px; }
+.muted { color: var(--text-dim); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: transform 0.2s, border-color 0.2s;
+}
+.card:hover { border-color: #8b949e; transform: translateY(-2px); }
+
+.pill {
+  background-color: rgba(110, 118, 129, 0.1);
+  border: 1px solid var(--border-default);
+  border-radius: 2em;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 10px;
 }
 
-.hidden {
-    display: none;
-}
+.hidden { display: none !important; }
 
-#challenge-list li {
-    cursor: pointer;
-    padding: 5px;
-    border-bottom: 1px solid #333;
+/* Landing Page Styles */
+.landing-shell { display: flex; flex-direction: column; height: 100vh; overflow-y: auto; background-color: var(--bg-main); }
+.hero {
+  text-align: center;
+  padding: 120px 20px;
+  background: radial-gradient(circle at center, rgba(31, 111, 235, 0.15) 0%, transparent 70%);
 }
+.hero h1 { font-size: 64px; margin-bottom: 24px; letter-spacing: -2px; line-height: 1.1; }
+.hero p { font-size: 22px; color: var(--text-dim); max-width: 700px; margin: 0 auto 48px; }
 
-#challenge-list li:hover {
-    background-color: #333;
-}
+.btn-group { display: flex; gap: 16px; justify-content: center; align-items: center; }
+.btn-large { padding: 12px 32px; font-size: 16px; height: auto; }
 
-#challenge-list li.active {
-    background-color: #444;
-    font-weight: bold;
-    border-left: 3px solid #3498db;
-}
+/* Auth forms */
+.auth-container { width: 100%; max-width: 340px; margin: auto; padding: 20px; }
+.auth-box { background-color: var(--bg-card); border: 1px solid var(--border-default); border-radius: var(--radius-md); padding: 24px; }
+.auth-box label { display: block; margin-bottom: 8px; font-weight: 500; }
+.auth-footer { margin-top: 16px; text-align: center; font-size: 13px; color: var(--text-dim); }
 
-#questions-container .question {
-    margin-bottom: 15px;
-    padding: 10px;
-    border: 1px solid #555;
-    border-radius: 5px;
-}
+/* Session Layout */
+.session-layout { display: grid; grid-template-columns: 380px 1fr; gap: 32px; flex-grow: 1; min-height: 0; }
+.runtime-view { background: #000; border-radius: var(--radius-lg); border: 1px solid var(--border-default); overflow: hidden; height: 100%; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
 
-#questions-container .question.completed {
-    background-color: #2a4a2a;
-    border-color: #4a8a4a;
-}
-
-#vm-log-container {
-    margin-top: 20px;
-    border-top: 1px solid #444;
-    padding-top: 10px;
-}
-
-#vm-log-container h3 {
-    margin-bottom: 5px;
-    font-size: 1.1em;
-}
-
-#vm-log {
-    width: 100%;
-    height: 150px;
-    background-color: #000;
-    color: #0f0;
-    border: 1px solid #333;
-    font-family: monospace;
-    font-size: 12px;
-    padding: 5px;
-    resize: vertical;
-    outline: none;
-    box-sizing: border-box;
-}
-
-#end-session-btn {
-    margin-top: 20px;
-    padding: 10px 15px;
-    background-color: #c0392b;
-    border: none;
-    color: white;
-    cursor: pointer;
-}
+.stack { display: flex; flex-direction: column; gap: 16px; }

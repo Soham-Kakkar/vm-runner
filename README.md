@@ -1,6 +1,6 @@
-# VM-Runner: A Modern CTF Virtualization Platform
+# VM Runner
 
-VM-Runner is a high-performance, web-based platform for hosting and managing virtualized Capture The Flag (CTF) challenges. Built with Go and QEMU, it provides a seamless experience for both CLI-based terminal challenges and full graphical (GUI) operating system environments.
+VM Runner is a Go-based CTF session platform for launching QEMU-backed challenge VMs, validating submissions, and exposing sessions over WebSocket or noVNC.
 
 ## 🚀 Key Features
 
@@ -8,30 +8,33 @@ VM-Runner is a high-performance, web-based platform for hosting and managing vir
 - **Serial Terminal:** PTY-based interaction using `xterm.js` over WebSockets. Ideal for CLI-centric challenges with high-speed text interaction.
 - **VNC Graphical Mode:** Full graphical support via `noVNC` for GUI-based OSs, featuring absolute mouse synchronization and scaling.
 
-### 🛡️ Automated Flag Detection
-- **Real-time Scanning:** Background monitoring of VM serial output (`mon:stdio`) using a sliding window buffer to detect `flag{...}` patterns instantly.
-- **Automatic Question Completion:** Automatically updates the challenge status upon detection, providing immediate feedback to the user.
+### 🛡️ Submission Validation
+- **Static flags:** direct comparison against stored challenge flags.
+- **HMAC flags:** per-session deterministic flag generation from the session seed.
+- **Dynamic Port Allocation:** Automated port searching for VNC/WS per session for better concurrency.
+- **Buffered output:** terminal output is preserved so reconnects can recover the runtime stream.
 
 ### ⚡ Performance & Stability
-- **Message Batching:** WebSocket updates are batched (50ms) to significantly reduce browser UI reflows and prevent "word-by-word" rendering lag.
-- **History Buffering:** 100KB backend buffer ensures that terminal output is preserved across page reloads and reconnections.
-- **Resource Management:** Frontend log capping and clean terminal state resets (using `term.reset()`) maintain a snappy and bug-free user interface.
+- **Message batching:** WebSocket updates are batched to reduce terminal repaint churn.
+- **History buffering:** the backend keeps a rolling output buffer for reconnects.
+- **Overlay cleanup:** per-session runtime directories keep VM state isolated.
 
 ### 📋 Bidirectional Clipboard
 - **Cross-Copy Support:** Integrated support for host-to-guest and guest-to-host clipboard synchronization via `qemu-vdagent` (requires `spice-vdagent` in the guest OS).
 
 ## 🏗️ Architecture
 
-- **Backend:** Go (Standard library `net/http`, `gorilla/websocket` for real-time proxying, `creack/pty` for terminal management).
-- **Frontend:** Vanilla JavaScript with `xterm.js` for terminal rendering and `noVNC` for graphical framebuffer display.
-- **Virtualization:** QEMU with KVM acceleration (where supported) for near-native performance.
+- **Backend:** Go (`net/http`, `gorilla/websocket`, `creack/pty`).
+- **Frontend:** Vanilla JavaScript with `xterm.js` and `noVNC`.
+- **Storage:** JSON-backed CTF/challenge configs under `data/ctfs/`.
+- **Virtualization:** QEMU with optional KVM acceleration and per-session overlays.
 
 ## 🛠️ Getting Started
 
 ### Prerequisites
 - Go 1.25+
 - QEMU installed and in your system PATH.
-- (Optional) `spice-vdagent` installed on guest images for clipboard features.
+- `qemu-img` available for qcow2 overlays.
 
 ### Installation
 1. Clone the repository.
@@ -39,16 +42,31 @@ VM-Runner is a high-performance, web-based platform for hosting and managing vir
    ```bash
    go build -o server ./cmd/server/main.go
    ```
-3. Define your challenges in `data/challenges/` using the `config.json` schema.
-4. Start the server:
+3. Build the VM runner CLI (for inclusion in guest images):
+   ```bash
+   go build -o vmrunner ./cmd/vmrunner/main.go
+   ```
+4. Define your CTFs in `data/ctfs/*.json`.
+5. Start the server:
    ```bash
    ./server
    ```
-5. Access the dashboard at `http://localhost:8080`.
+6. Access the dashboard at `http://localhost:8080`.
+
+### API Overview
+- `GET /api/ctfs`
+- `POST /api/ctfs`
+- `POST /api/ctfs/:id/publish`
+- `POST /api/ctfs/:id/disable`
+- `POST /api/challenges`
+- `POST /api/sessions`
+- `GET /api/sessions/:id`
+- `POST /api/sessions/:id/stop`
+- `POST /api/sessions/:id/submit-answer`
+- `WS /ws/session/:id`
 
 ## 🛤️ Roadmap
 
-- [ ] **Dynamic Port Allocation:** Move away from hardcoded VNC/WS ports to a dynamic pooling system for concurrent sessions.
 - [ ] **Networking Isolation:** Implement Tap/Bridge networking with firewall rules to isolate guest VMs from each other and the host network.
 - [ ] **User Authentication:** Support for multiple users with secure session management and persistence.
 - [ ] **Resource Quotas:** Fine-grained CPU and memory limiting per challenge session.

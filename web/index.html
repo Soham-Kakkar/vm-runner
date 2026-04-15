@@ -1,41 +1,76 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VM-Based CTF</title>
-    <link rel="stylesheet" href="styles.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.15.0/css/xterm.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dashboard - VM Runner</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div id="container">
-        <div id="challenge-panel">
-            <h1>Challenges</h1>
-            <ul id="challenge-list"></ul>
-            <div id="session-view" class="hidden">
-                <h2 id="session-challenge-name"></h2>
-                <div id="questions-container"></div>
-                <div id="vm-log-container">
-                    <h3>VM Output Log</h3>
-                    <textarea id="vm-log" readonly></textarea>
-                </div>
-                <button id="end-session-btn">End Session</button>
-            </div>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="brand-mark">VM</div>
+          <h1 style="font-size: 18px;">VM Runner</h1>
         </div>
-        <div id="terminal-panel">
-            <div id="terminal"></div>
-            <div id="vnc-container" class="hidden">
-                <div id="vnc-screen"></div>
-            </div>
+      </div>
+      <nav class="nav">
+        <a href="/" class="nav-item active">
+          <span>🏠</span> Dashboard
+        </a>
+        <a href="/maker/" id="nav-maker" class="nav-item hidden">
+          <span>🛠️</span> CTF Maker
+        </a>
+        <div style="margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border-default);">
+          <div class="nav-item" style="font-size: 12px; color: var(--text-dim);">
+            Logged in as <span id="user-display" style="color: var(--text-main); font-weight: 600;"></span>
+          </div>
+          <a href="#" id="logout-btn" class="nav-item">
+            <span>🚪</span> Logout
+          </a>
         </div>
+      </nav>
+    </aside>
 
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/xterm@4.15.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
-    <script type="module">
-        import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.3.0/core/rfb.js';
-        window.RFB = RFB;
-    </script>
-    <script src="app.js"></script>
+    <main class="workspace">
+      <div class="container">
+        <header class="page-header">
+          <div class="page-title">
+            <h2>CTF Dashboard</h2>
+            <p class="muted">You have <span id="ctf-count">0</span> active CTFs available.</p>
+          </div>
+          <button id="create-btn" class="primary hidden" onclick="window.location.href='/maker/'">Create CTF</button>
+        </header>
+
+        <section id="ctf-list" class="grid">
+          <!-- CTF cards will be injected here -->
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    // Auth & Role check
+    const userStr = localStorage.getItem('vmrunner_user');
+    if (!userStr) {
+      window.location.href = '/landing/';
+    } else {
+      const user = JSON.parse(userStr);
+      document.getElementById('user-display').textContent = user.username;
+      if (user.role === 'admin') {
+        document.getElementById('nav-maker').classList.remove('hidden');
+        document.getElementById('create-btn').classList.remove('hidden');
+      }
+    }
+
+    document.getElementById('logout-btn').addEventListener('click', e => {
+      e.preventDefault();
+      localStorage.removeItem('vmrunner_user');
+      localStorage.removeItem('vmrunner_token');
+      window.location.href = '/landing/';
+    });
+  </script>
 </body>
 </html>
