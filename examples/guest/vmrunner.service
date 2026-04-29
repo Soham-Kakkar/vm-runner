@@ -1,0 +1,16 @@
+[Unit]
+Description=VMRunner guest bootstrap for CTF flag generation
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vmrunner
+Group=vmrunner
+PermissionsStartOnly=true
+ExecStartPre=/usr/bin/install -d -o vmrunner -g vmrunner -m 0750 /var/lib/vmrunner/challenges
+ExecStart=/usr/local/bin/place_flags.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

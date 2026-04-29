@@ -1,0 +1,48 @@
+{
+  "ctf_id": "demo_ctf",
+  "title": "Demo CTF",
+  "owner_id": "admin",
+  "visibility": "private",
+  "image_id": "img_demo",
+  "status": "draft",
+  "challenges": [
+    {
+      "id": "chal_txt",
+      "ctf_id": "demo_ctf",
+      "title": "Find the text flag",
+      "description": "Recover the flag hidden in abc.txt.",
+      "image_id": "img_demo",
+      "validator": "hmac",
+      "template": "flag{<hmac>_txt}",
+      "question_no": 1,
+      "vm_config": {
+        "image_path": "./data/ctfs/demo-ctf/base.qcow2",
+        "image_format": "qcow2",
+        "memory_mb": 1024,
+        "cpus": 1,
+        "architecture": "x86_64",
+        "timeout_seconds": 1800,
+        "display_type": "nographic"
+      }
+    },
+    {
+      "id": "chal_img",
+      "ctf_id": "demo_ctf",
+      "title": "Find the image flag",
+      "description": "Run strings on abc.jpg to recover the flag.",
+      "image_id": "img_demo",
+      "validator": "hmac",
+      "template": "flag{<hmac>_img}",
+      "question_no": 2,
+      "vm_config": {
+        "image_path": "./data/ctfs/demo-ctf/base.qcow2",
+        "image_format": "qcow2",
+        "memory_mb": 1024,
+        "cpus": 1,
+        "architecture": "x86_64",
+        "timeout_seconds": 1800,
+        "display_type": "nographic"
+      }
+    }
+  ]
+}

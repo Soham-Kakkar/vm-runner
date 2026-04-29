@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+
+description="VMRunner guest bootstrap for CTF flag generation"
+
+depend() {
+	need localmount
+}
+
+start() {
+	ebegin "placing VMRunner flags"
+	install -d -o vmrunner -g vmrunner -m 0750 /var/lib/vmrunner/challenges
+	VMRUNNER_BIN="${VMRUNNER_BIN:-/usr/local/bin/vmrunner}" \
+	SEED_PATH="${SEED_PATH:-/mnt/vmrunner/seed}" \
+	FLAG_ROOT="${FLAG_ROOT:-/var/lib/vmrunner/challenges}" \
+		/usr/local/bin/place_flags.sh
+	eend $?
+}
