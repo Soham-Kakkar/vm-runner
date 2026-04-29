@@ -1,14 +1,20 @@
 [Unit]
 Description=VMRunner guest bootstrap for CTF flag generation
-After=network-online.target local-fs.target
-Wants=network-online.target
+After=local-fs.target
 
 [Service]
 Type=oneshot
 User=vmrunner
 Group=vmrunner
+SupplementaryGroups=ctf
 PermissionsStartOnly=true
-ExecStartPre=/usr/bin/install -d -o vmrunner -g vmrunner -m 0750 /var/lib/vmrunner/challenges
+ExecStartPre=/usr/bin/install -d -o vmrunner -g vmrunner -m 0750 /run/vmrunner
+ExecStartPre=/usr/bin/install -d -o vmrunner -g ctf -m 2750 /var/lib/vmrunner/challenges
+ExecStartPre=/bin/sh -c 'modprobe 9pnet_virtio 2>/dev/null || true; mkdir -p /mnt/vmrunner; grep -qs " /mnt/vmrunner " /proc/mounts || mount -t 9p -o trans=virtio,version=9p2000.L vmrunner /mnt/vmrunner'
+ExecStartPre=/bin/sh -c 'cp /mnt/vmrunner/seed /run/vmrunner/seed && chown vmrunner:vmrunner /run/vmrunner/seed && chmod 0400 /run/vmrunner/seed'
+Environment=SEED_PATH=/run/vmrunner/seed
+Environment=FLAG_ROOT=/var/lib/vmrunner/challenges
+Environment=VMRUNNER_BIN=/usr/local/bin/vmrunner
 ExecStart=/usr/local/bin/place_flags.sh
 RemainAfterExit=yes
 

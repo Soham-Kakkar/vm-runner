@@ -1,0 +1,87 @@
+# VMRunner Deployment Notes
+
+## Server Secret
+
+The server derives each session seed from `VMRUNNER_SECRET` and the session ID.
+Do not run shared events with the default development secret.
+
+```sh
+export VMRUNNER_SECRET="$(openssl rand -hex 32)"
+export VMRUNNER_DATA_DIR=/srv/vmrunner/data
+./server
+```
+
+For a systemd deployment, set those values in the unit or an environment file
+outside the repository.
+
+## Build The Guest Helper
+
+Build the helper binary from this repo and install it into each challenge image:
+
+```sh
+go build -o bin/vmrunner ./cmd/vmrunner
+```
+
+Inside the guest image, install:
+
+```sh
+install -o vmrunner -g vmrunner -m 0500 bin/vmrunner /usr/local/bin/vmrunner
+install -o vmrunner -g vmrunner -m 0500 examples/guest/place_flags.sh /usr/local/bin/place_flags.sh
+```
+
+Use `examples/guest/vmrunner.service` for systemd guests or
+`examples/guest/vmrunner.openrc` for Alpine/OpenRC guests.
+
+## Maker Flow
+
+1. Build a guest disk image that contains the `vmrunner` user, helper binary,
+   protected loader script, and boot service.
+2. Put challenge assets in the image, such as `/opt/ctf/abc_base.jpg`.
+3. Create a CTF JSON like `examples/ctf/demo-ctf.json` with HMAC validators,
+   templates, and question numbers.
+4. Copy the CTF JSON to `data/ctfs/<id>.json`.
+5. Start the server and launch a session from the web UI.
+
+At runtime, the server writes `data/runtime/<session>/seed` and exposes that
+directory to QEMU as the `vmrunner` 9p mount. The guest service copies the seed
+to `/run/vmrunner/seed`, runs as the `vmrunner` user, and writes challenge
+outputs into `/var/lib/vmrunner/challenges`.
+
+The generated challenge files are group-readable by the `ctf` group. The
+generator binary, loader script, and seed remain owned by `vmrunner:vmrunner`
+with no access for the student user.
+
+The guest must support virtio 9p. The included service examples load
+`9pnet_virtio` when available and mount the QEMU tag with:
+
+```sh
+mount -t 9p -o trans=virtio,version=9p2000.L vmrunner /mnt/vmrunner
+```
+
+## Demo QCOW2 Builder
+
+For a quick local end-to-end image, use the builder script instead of manually
+installing an OS from an ISO:
+
+```sh
+scripts/build-demo-qcow2.sh
+cp examples/ctf/demo-ctf.json data/ctfs/demo-ctf.json
+```
+
+The script downloads an Ubuntu cloud qcow2, builds the guest `vmrunner` helper,
+injects the helper plus `place_flags.sh` and `vmrunner.service`, enables serial
+login, and writes `data/ctfs/demo-ctf/base.qcow2`.
+
+On Ubuntu systems where `/boot/vmlinuz-*` and `/boot/initrd.img-*` are not
+readable by normal users, the script uses `sudo` for the `virt-customize` step.
+
+## Preflight
+
+After mounting or unpacking a guest image root, run:
+
+```sh
+scripts/preflight.sh /path/to/mounted-root
+```
+
+The preflight checks for the `vmrunner` user, helper binary, protected loader
+script, and either the systemd or OpenRC service.

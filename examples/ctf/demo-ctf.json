@@ -1,10 +1,19 @@
 {
-  "ctf_id": "demo_ctf",
-  "title": "Demo CTF",
+  "id": "demo_ctf",
+  "title": "Demo HMAC CTF",
   "owner_id": "admin",
   "visibility": "private",
-  "image_id": "img_demo",
+  "maker": "admin",
   "status": "draft",
+  "vm_config": {
+    "image_path": "./data/ctfs/demo-ctf/base.qcow2",
+    "image_format": "qcow2",
+    "memory_mb": 1024,
+    "cpus": 1,
+    "architecture": "x86_64",
+    "timeout_seconds": 1800,
+    "display_type": "terminal"
+  },
   "challenges": [
     {
       "id": "chal_txt",
@@ -14,16 +23,7 @@
       "image_id": "img_demo",
       "validator": "hmac",
       "template": "flag{<hmac>_txt}",
-      "question_no": 1,
-      "vm_config": {
-        "image_path": "./data/ctfs/demo-ctf/base.qcow2",
-        "image_format": "qcow2",
-        "memory_mb": 1024,
-        "cpus": 1,
-        "architecture": "x86_64",
-        "timeout_seconds": 1800,
-        "display_type": "nographic"
-      }
+      "question_no": 1
     },
     {
       "id": "chal_img",
@@ -33,16 +33,7 @@
       "image_id": "img_demo",
       "validator": "hmac",
       "template": "flag{<hmac>_img}",
-      "question_no": 2,
-      "vm_config": {
-        "image_path": "./data/ctfs/demo-ctf/base.qcow2",
-        "image_format": "qcow2",
-        "memory_mb": 1024,
-        "cpus": 1,
-        "architecture": "x86_64",
-        "timeout_seconds": 1800,
-        "display_type": "nographic"
-      }
+      "question_no": 2
     }
   ]
 }

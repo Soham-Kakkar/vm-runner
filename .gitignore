@@ -1,5 +1,7 @@
 data
 *.md
 !README.md
+!docs/*.md
 bin/
 .env
+ok 

@@ -43,7 +43,6 @@ printf "%${padding_count}s%s\n" '' "$txt_flag" > "$txt_file"
 
 if [ -f "$BASE_IMAGE" ]; then
   cp "$BASE_IMAGE" "$img_file"
-  chmod u+w "$img_file"
 else
   : > "$img_file"
 fi

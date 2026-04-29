@@ -257,8 +257,13 @@ func (qm *QEMUManager) createOverlay() error {
 		return nil
 	}
 	_ = os.MkdirAll(qm.RuntimeDir, 0o755)
-	cmd := exec.Command("qemu-img", "create", "-f", "qcow2", "-b", qm.Config.ImagePath, qm.overlayPath)
-	return cmd.Run()
+	cmd := exec.Command("qemu-img", "create", "-f", "qcow2", "-b", qm.Config.ImagePath, "-B", qm.driveFormat(), qm.overlayPath)
+	if err := cmd.Run(); err != nil {
+		// QEMU <= 10.0 used -F for the backing format; QEMU 10.1+ uses -B.
+		cmd = exec.Command("qemu-img", "create", "-f", "qcow2", "-b", qm.Config.ImagePath, "-F", qm.driveFormat(), qm.overlayPath)
+		return cmd.Run()
+	}
+	return nil
 }
 
 func (qm *QEMUManager) driveFormat() string {

@@ -23,23 +23,53 @@ check_binary() {
 }
 
 check_service() {
-  if [ ! -e "$image_root/etc/systemd/system/vmrunner.service" ]; then
-    echo "missing vmrunner.service in image" >&2
+  systemd_service="$image_root/etc/systemd/system/vmrunner.service"
+  openrc_service="$image_root/etc/init.d/vmrunner"
+
+  if [ ! -e "$systemd_service" ] && [ ! -e "$openrc_service" ]; then
+    echo "missing vmrunner service in image (systemd or OpenRC)" >&2
+    exit 1
+  fi
+
+  if [ -e "$openrc_service" ] && [ ! -x "$openrc_service" ]; then
+    echo "OpenRC vmrunner service is not executable" >&2
     exit 1
   fi
 }
 
-check_perms() {
-  mode=$(stat -c '%a' "$image_root/usr/local/bin/vmrunner" 2>/dev/null || echo "")
-  if [ "$mode" != "500" ] && [ "$mode" != "550" ] && [ "$mode" != "700" ]; then
-    echo "unexpected vmrunner mode: $mode" >&2
+check_loader() {
+  if [ ! -e "$image_root/usr/local/bin/place_flags.sh" ]; then
+    echo "missing place_flags.sh in image" >&2
+    exit 1
+  fi
+}
+
+check_private_exec() {
+  path="$1"
+  label="$2"
+  mode=$(stat -c '%a' "$path" 2>/dev/null || echo "")
+  owner_digit=${mode%??}
+  other_digit=${mode#${mode%?}}
+
+  case "$owner_digit" in
+    5|7) ;;
+    *)
+      echo "unexpected $label owner mode: $mode" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ "$other_digit" != "0" ]; then
+    echo "$label must not be world-readable/executable: mode $mode" >&2
     exit 1
   fi
 }
 
 check_user
 check_binary
+check_loader
 check_service
-check_perms
+check_private_exec "$image_root/usr/local/bin/vmrunner" "vmrunner"
+check_private_exec "$image_root/usr/local/bin/place_flags.sh" "place_flags.sh"
 
 echo "preflight passed for $image_root"
