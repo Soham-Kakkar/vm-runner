@@ -14,27 +14,30 @@ Run this on the host from the repository root:
 
 ```sh
 mkdir -p guest-share
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o guest-share/vmrunner ./cmd/vmrunner
-cp examples/guest/place_flags.sh guest-share/place_flags.sh
-cp examples/guest/vmrunner.openrc guest-share/vmrunner.openrc
-cp examples/guest/vmrunner.service guest-share/vmrunner.service
-cp examples/guest/provision_alpine.sh guest-share/provision_alpine.sh
+go build -o guest-share/vmrunner ./cmd/vmrunner
 ```
 
-The important file is `guest-share/vmrunner`. If the guest later says
-`vmrunner binary not found or not executable`, this file was not installed into
-the qcow2, or it was installed with the wrong mode/path.
+And ensure the following exist in `guest-share` directory:
+```
+place_flags.sh
+provision_alpine.sh
+vmrunner
+vmrunner.openrc     # or vmrunner.service for systemd based OSs
+```
+
+If the guest later says `vmrunner binary not found or not executable`, this file was not installed into the qcow2, or it was installed with the wrong mode/path.
 
 ## 2. Install ISO Into QCOW2
 
 Create the disk and boot the installer:
 
 ```sh
+qemu-img create -f qcow2 alpine.qcow2 4G  # qemu-img create -f qcow2 <name>.qcow2 <size>
 scripts/install-iso-qcow2.sh \
-  --iso alpine-standard-3.23.4-x86.iso \
-  --disk data/ctfs/my-alpine/base.qcow2 \
+  --iso alpine.iso \
+  --disk alpine.qcow2 \
   --size 4G \
-  --display vnc \
+  --display serial \    # use vnc for GUI systems
 
   --memory 1024 \
   --cpus 2 \
@@ -59,7 +62,7 @@ Boot the installed qcow2 and expose `guest-share`:
 
 ```sh
 scripts/install-iso-qcow2.sh \
-  --disk data/ctfs/my-alpine/base.qcow2 \
+  --disk alpine.qcow2 \
   --mode boot \
   --display vnc \
   --share guest-share \
@@ -79,10 +82,10 @@ ls -l /mnt/share
 
 You must see at least:
 
-```text
+```sh
 vmrunner
 place_flags.sh
-vmrunner.openrc
+vmrunner.openrc   # vmrunner.service
 provision_alpine.sh
 ```
 
@@ -276,7 +279,7 @@ Boot the installed disk with the host share:
 
 ```sh
 scripts/install-iso-qcow2.sh \
-  --disk data/ctfs/my-debian/base.qcow2 \
+  --disk image.qcow2 \
   --mode boot \
   --display vnc \
   --share guest-share \

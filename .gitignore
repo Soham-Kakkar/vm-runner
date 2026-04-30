@@ -3,4 +3,5 @@ bin/
 .env
 /images
 *.iso
-*.qcow2 
+*.qcow2
+vmrunner
