@@ -11,6 +11,7 @@
     .challenge-editor { background: var(--bg-input); border: 1px solid var(--border-default); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
     .form-group { display: flex; flex-direction: column; gap: 8px; }
     .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .table-wrap { overflow-x: auto; }
   </style>
 </head>
 <body>
@@ -24,10 +25,10 @@
       </div>
       <nav class="nav">
         <a href="/" class="nav-item">
-          <span>🏠</span> Dashboard
+          Dashboard
         </a>
         <a href="/maker/" class="nav-item active">
-          <span>🛠️</span> CTF Maker
+          CTF Maker
         </a>
       </nav>
     </aside>
@@ -94,10 +95,51 @@
           <div id="challenges-container">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
               <h3 style="font-size: 18px;">Questions</h3>
-              <button type="button" id="add-challenge-btn">+ Add Question</button>
+              <button type="button" id="add-challenge-btn">Add Question</button>
             </div>
             <div id="challenges-list" class="stack">
               <!-- Challenges will be added here -->
+            </div>
+          </div>
+
+          <div id="telemetry-section" class="card hidden">
+            <h3 class="section-title">Telemetry</h3>
+            <div class="stack">
+              <div>
+                <h4 style="margin-bottom: 8px;">Scores</h4>
+                <div class="table-wrap">
+                  <table id="scores-table" class="table">
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Score</th>
+                        <th>Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr><td colspan="3" class="muted">No scores yet.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div>
+                <h4 style="margin-bottom: 8px;">Accepted Submissions</h4>
+                <div class="table-wrap">
+                  <table id="telemetry-table" class="table">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>User</th>
+                        <th>Challenge</th>
+                        <th>Last Command</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr><td colspan="4" class="muted">No accepted submissions yet.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
         </form>

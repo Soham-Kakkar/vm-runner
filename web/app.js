@@ -4,6 +4,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const APP_URL = window.location.protocol === 'file:' ? 'http://localhost:8080' : '';
   const currentUser = JSON.parse(localStorage.getItem('vmrunner_user') || '{}');
 
+  function authHeaders(extra = {}) {
+    return {
+      ...extra,
+      'X-VMRunner-User': currentUser.username || '',
+      'X-VMRunner-Role': currentUser.role || ''
+    };
+  }
+
   function escapeHTML(value) {
     return String(value || '').replace(/[&<>"']/g, ch => ({
       '&': '&amp;',
@@ -25,7 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
   async function loadCTFs() {
     // If this script runs on a page without a CTF list (e.g. the per-CTF page), skip.
     if (!ctfList || !ctfCount) return;
-    const res = await fetch(`${APP_URL}/api/ctfs`);
+    const res = await fetch(`${APP_URL}/api/ctfs`, { headers: authHeaders() });
     if (!res.ok) throw new Error('failed to load ctfs');
     const ctfs = await res.json();
     ctfList.innerHTML = '';
@@ -33,9 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
     ctfs.forEach(ctf => {
       const card = document.createElement('div');
       card.className = 'card';
-      const editLink = 
-        `<a href="/maker/?id=${encodeURIComponent(ctf.id)}" class="btn">Edit</a>`
-        // : '';
+      const editLink = canEditCTF(ctf)
+        ? `<a href="/maker/?id=${encodeURIComponent(ctf.id)}" class="btn">Edit</a>`
+        : '';
       card.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: flex-start;">
           <h3 style="font-size: 18px;">${escapeHTML(ctf.title)}</h3>
@@ -44,14 +52,14 @@ document.addEventListener('DOMContentLoaded', () => {
         <div style="margin: 8px 0; font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);">
           ID: ${escapeHTML(ctf.id)}
         </div>
-        <p style="flex-grow: 1;">${ctf.visibility === 'public' ? '🌍 Public Lab' : '🔒 Private Lab'}</p>
+        <p style="flex-grow: 1;">${ctf.visibility === 'public' ? 'Public Lab' : 'Private Lab'}</p>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-default);">
           <div style="display: flex; flex-direction: column;">
             <span style="font-size: 12px; font-weight: 600;">${ctf.challenges?.length || 0} Challenges</span>
             <span style="font-size: 11px; color: var(--text-dim);">by ${escapeHTML(ctf.maker || 'system')}</span>
           </div>
           <div style="display: flex; gap: 8px;">
-            ${editLink}
+            ${editLink && editLink}
             <a href="/ctf/?id=${encodeURIComponent(ctf.id)}" class="btn primary">Enter Lab</a>
           </div>
         </div>

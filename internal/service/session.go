@@ -34,6 +34,12 @@ type sessionRecord struct {
 	history      []byte
 	historyMu    sync.Mutex
 	outputBuffer strings.Builder
+	commandMu    sync.Mutex
+	commandBuf   []rune
+	lastCommand  string
+	tabPending   bool
+	solvedMu     sync.Mutex
+	solvedMap    map[string]bool
 }
 
 type SessionManager struct {
@@ -153,12 +159,12 @@ func (sm *SessionManager) inactivityWatcher() {
 }
 
 func (sm *SessionManager) StartSession(challengeID string) (*storage.Session, error) {
-	return sm.StartSessionWithID(challengeID, "")
+	return sm.StartSessionWithID(challengeID, "", "")
 }
 
 // StartSessionWithID starts a session using the provided sessionID.
 // If sessionID is empty a new random UUID will be generated.
-func (sm *SessionManager) StartSessionWithID(challengeID, sessionID string) (*storage.Session, error) {
+func (sm *SessionManager) StartSessionWithID(challengeID, sessionID, userID string) (*storage.Session, error) {
 	challenge, err := sm.challengeStore.GetChallenge(challengeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get challenge: %w", err)
@@ -206,6 +212,7 @@ func (sm *SessionManager) StartSessionWithID(challengeID, sessionID string) (*st
 	session := &storage.Session{
 		ID:           sessionID,
 		ChallengeID:  challenge.ID,
+		UserID:       userID,
 		RuntimePath:  runtimePath,
 		Seed:         seed,
 		CreatedAt:    now,
@@ -218,6 +225,7 @@ func (sm *SessionManager) StartSessionWithID(challengeID, sessionID string) (*st
 	record := &sessionRecord{
 		session:   session,
 		vmManager: vmManager,
+		solvedMap: make(map[string]bool),
 	}
 
 	sm.mu.Lock()
@@ -301,6 +309,7 @@ func (sm *SessionManager) SwitchSessionChallenge(sessionID, challengeID string) 
 	if record.session.ExpiresAt.Before(now) {
 		record.session.ExpiresAt = now.Add(30 * time.Minute)
 	}
+	record.outputBuffer.Reset()
 	sm.mu.Unlock()
 
 	if err := sm.saveSessionToDisk(record.session); err != nil {
@@ -355,6 +364,7 @@ func (sm *SessionManager) HandleVMInput(sessionID, input string) error {
 	if record.session.Status != storage.SessionStatusActive {
 		return ErrSessionClosed
 	}
+	sm.trackCommand(record, input)
 	_, err = record.vmManager.SendInput(input)
 	if err != nil {
 		log.Printf("failed to send input to vm for session %s: %v", sessionID, err)
@@ -369,7 +379,7 @@ func (sm *SessionManager) HandleVMInput(sessionID, input string) error {
 	return nil
 }
 
-func (sm *SessionManager) SubmitAnswer(sessionID, answer string) (bool, *storage.Submission, error) {
+func (sm *SessionManager) SubmitAnswer(sessionID, answer, lastCommand string) (bool, *storage.Submission, error) {
 	record, err := sm.getRecord(sessionID)
 	if err != nil {
 		return false, nil, err
@@ -394,22 +404,15 @@ func (sm *SessionManager) SubmitAnswer(sessionID, answer string) (bool, *storage
 
 	sm.mu.Lock()
 	record.session.Submissions = append(record.session.Submissions, *submission)
-	if correct && record.session.SolvedAt == nil {
-		now := submission.CreatedAt
-		record.session.SolvedAt = &now
-	}
 	sm.mu.Unlock()
 
-	if correct && sm.flagFoundChan != nil {
-		sm.flagFoundChan <- FlagFoundEvent{SessionID: record.session.ID, QuestionID: record.session.Challenge.ID}
-	}
 	if correct {
-		record.historyMu.Lock()
-		ws := record.webSocket
-		record.historyMu.Unlock()
-		if ws != nil {
-			ws <- WebSocketMessage{Type: "flag_found", Payload: map[string]string{"challenge_id": record.session.Challenge.ID}}
+		if lastCommand = stripTerminalControlCodes(strings.TrimSpace(lastCommand)); lastCommand != "" {
+			record.commandMu.Lock()
+			record.lastCommand = lastCommand
+			record.commandMu.Unlock()
 		}
+		sm.onSolved(record, submission.CreatedAt, record.session.Challenge.ID)
 	}
 
 	return correct, submission, nil
@@ -479,6 +482,7 @@ func (sm *SessionManager) monitorVM(sessionID string) {
 			}
 			output := string(outputBytes)
 			batch.WriteString(output)
+			sm.applyTabCompletion(record, output)
 			sm.appendHistory(record, outputBytes)
 			sm.checkForFlag(record, output)
 		case err, ok := <-record.vmManager.ErrorChan:
@@ -567,18 +571,257 @@ func (sm *SessionManager) checkForFlag(record *sessionRecord, output string) {
 	}
 
 	if expected != "" && strings.Contains(currentBuf, expected) {
-		if sm.flagFoundChan != nil {
-			sm.flagFoundChan <- FlagFoundEvent{SessionID: record.session.ID, QuestionID: record.session.Challenge.ID}
+		if sm.onSolved(record, time.Now().UTC(), record.session.Challenge.ID) {
+			log.Printf("detected expected flag in session %s output", record.session.ID)
 		}
-		// Also send to websocket if connected
-		record.historyMu.Lock()
-		ws := record.webSocket
-		record.historyMu.Unlock()
-		if ws != nil {
-			ws <- WebSocketMessage{Type: "flag_found", Payload: map[string]string{"challenge_id": record.session.Challenge.ID}}
-		}
-		log.Printf("detected expected flag in session %s output", record.session.ID)
 	}
+}
+
+func (sm *SessionManager) trackCommand(record *sessionRecord, input string) {
+	if input == "" {
+		return
+	}
+	input = sanitizeCommandInput(input)
+	if input == "" {
+		return
+	}
+	record.commandMu.Lock()
+	defer record.commandMu.Unlock()
+	for _, r := range input {
+		switch r {
+		case '\t':
+			record.tabPending = true
+		case '\r', '\n':
+			record.tabPending = false
+			cmd := strings.TrimSpace(string(record.commandBuf))
+			if cmd != "" {
+				record.lastCommand = cmd
+			}
+			record.commandBuf = record.commandBuf[:0]
+		case 0x08, 0x7f:
+			record.tabPending = false
+			if len(record.commandBuf) > 0 {
+				record.commandBuf = record.commandBuf[:len(record.commandBuf)-1]
+			}
+		default:
+			record.tabPending = false
+			if r >= 0x20 {
+				record.commandBuf = append(record.commandBuf, r)
+			}
+		}
+	}
+}
+
+func (sm *SessionManager) applyTabCompletion(record *sessionRecord, output string) {
+	if output == "" {
+		return
+	}
+	record.commandMu.Lock()
+	defer record.commandMu.Unlock()
+	if !record.tabPending {
+		return
+	}
+	if strings.ContainsAny(output, "\r\n") {
+		record.tabPending = false
+		return
+	}
+	cleaned := stripTerminalControlCodes(output)
+	if cleaned == "" {
+		record.tabPending = false
+		return
+	}
+	buf := string(record.commandBuf)
+	if buf != "" {
+		if idx := strings.Index(cleaned, buf); idx >= 0 {
+			cleaned = cleaned[idx:]
+		}
+	}
+	if strings.HasPrefix(cleaned, buf) {
+		record.commandBuf = []rune(cleaned)
+	} else {
+		record.commandBuf = append(record.commandBuf, []rune(cleaned)...)
+	}
+	if cmd := strings.TrimSpace(string(record.commandBuf)); cmd != "" {
+		record.lastCommand = cmd
+	}
+	record.tabPending = false
+}
+
+func sanitizeCommandInput(input string) string {
+	if input == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(input))
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		if ch == 0x1b {
+			i++
+			if i >= len(input) {
+				break
+			}
+			next := input[i]
+			switch next {
+			case '[':
+				for i+1 < len(input) {
+					i++
+					if input[i] >= 0x40 && input[i] <= 0x7E {
+						break
+					}
+				}
+			case ']':
+				for i+1 < len(input) {
+					i++
+					if input[i] == 0x07 {
+						break
+					}
+					if input[i] == 0x1b && i+1 < len(input) && input[i+1] == '\\' {
+						i++
+						break
+					}
+				}
+			default:
+				// swallow the escape and the following byte
+			}
+			continue
+		}
+		switch ch {
+		case '\r', '\n', '\t', 0x08, 0x7f:
+			b.WriteByte(ch)
+		default:
+			if ch < 0x20 {
+				continue
+			}
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
+}
+
+func stripTerminalControlCodes(input string) string {
+	if input == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(input))
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		if ch == 0x1b {
+			i++
+			if i >= len(input) {
+				break
+			}
+			next := input[i]
+			switch next {
+			case '[':
+				for i+1 < len(input) {
+					i++
+					if input[i] >= 0x40 && input[i] <= 0x7E {
+						break
+					}
+				}
+			case ']':
+				for i+1 < len(input) {
+					i++
+					if input[i] == 0x07 {
+						break
+					}
+					if input[i] == 0x1b && i+1 < len(input) && input[i+1] == '\\' {
+						i++
+						break
+					}
+				}
+			default:
+				// swallow the escape and the following byte
+			}
+			continue
+		}
+		if ch < 0x20 || ch == 0x7f {
+			continue
+		}
+		b.WriteByte(ch)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func (sm *SessionManager) onSolved(record *sessionRecord, when time.Time, challengeID string) bool {
+	if challengeID == "" {
+		challengeID = record.session.Challenge.ID
+	}
+	record.solvedMu.Lock()
+	if record.solvedMap == nil {
+		record.solvedMap = make(map[string]bool)
+	}
+	if record.solvedMap[challengeID] {
+		record.solvedMu.Unlock()
+		return false
+	}
+	record.solvedMap[challengeID] = true
+	record.solvedMu.Unlock()
+
+	if sm.flagFoundChan != nil {
+		sm.flagFoundChan <- FlagFoundEvent{SessionID: record.session.ID, QuestionID: challengeID}
+	}
+
+	sm.mu.Lock()
+	if record.session.SolvedAt == nil {
+		record.session.SolvedAt = &when
+	}
+	if !hasCorrectSubmission(record.session.Submissions, challengeID) {
+		record.session.Submissions = append(record.session.Submissions, storage.Submission{
+			ID:          uuid.NewString(),
+			SessionID:   record.session.ID,
+			ChallengeID: challengeID,
+			IsCorrect:   true,
+			CreatedAt:   when,
+		})
+	}
+	sm.mu.Unlock()
+
+	if err := sm.saveSessionToDisk(record.session); err != nil {
+		log.Printf("warning: failed to persist solved session %s: %v", record.session.ID, err)
+	}
+
+	ctfID := record.session.Challenge.CTFID
+	if ctfID != "" {
+		record.commandMu.Lock()
+		lastCommand := stripTerminalControlCodes(record.lastCommand)
+		record.commandMu.Unlock()
+		event := storage.TelemetryEvent{
+			CTFID:       ctfID,
+			SessionID:   record.session.ID,
+			ChallengeID: challengeID,
+			User:        record.session.UserID,
+			LastCommand: lastCommand,
+			IsCorrect:   true,
+			CreatedAt:   when,
+		}
+		if err := sm.challengeStore.AppendTelemetry(ctfID, event); err != nil {
+			log.Printf("warning: failed to append telemetry for ctf %s: %v", ctfID, err)
+		}
+		if record.session.UserID != "" {
+			if _, err := sm.challengeStore.IncrementScore(ctfID, record.session.UserID); err != nil {
+				log.Printf("warning: failed to update score for ctf %s: %v", ctfID, err)
+			}
+		}
+	}
+
+	record.historyMu.Lock()
+	ws := record.webSocket
+	record.historyMu.Unlock()
+	if ws != nil {
+		ws <- WebSocketMessage{Type: "flag_found", Payload: map[string]string{"challenge_id": challengeID}}
+	}
+	return true
+}
+
+func hasCorrectSubmission(submissions []storage.Submission, challengeID string) bool {
+	for _, submission := range submissions {
+		if submission.IsCorrect && submission.ChallengeID == challengeID {
+			return true
+		}
+	}
+	return false
 }
 
 func (sm *SessionManager) getRecord(sessionID string) (*sessionRecord, error) {

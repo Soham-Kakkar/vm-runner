@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,38 +43,53 @@ func (h *HTTPHandler) handleAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
 	var req storage.User
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+
+	req.Username = strings.TrimSpace(req.Username)
+	req.Password = strings.TrimSpace(req.Password)
 	if req.Username == "" || req.Password == "" {
 		http.Error(w, "username and password are required", http.StatusBadRequest)
 		return
 	}
 
 	if strings.Contains(r.URL.Path, "register") {
+		req.Name = strings.TrimSpace(req.Name)
+		req.ExternalID = strings.TrimSpace(req.ExternalID)
+		if req.Name == "" || req.ExternalID == "" {
+			http.Error(w, "name and id are required", http.StatusBadRequest)
+			return
+		}
+		req.Role = normalizeRole(req.Role)
 		if req.Role == "" {
 			req.Role = "user"
+		}
+		if req.Role != "user" && req.Role != "admin" {
+			http.Error(w, "role must be user or admin", http.StatusBadRequest)
+			return
 		}
 		if err := h.challengeStore.CreateUser(req); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]string{"status": "registered"})
-	} else {
-		user, err := h.challengeStore.GetUser(req.Username)
-		if err != nil || user.Password != req.Password {
-			http.Error(w, "invalid username or password", http.StatusUnauthorized)
-			return
-		}
-		// Simplified token response for MVP
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status": "logged-in",
-			"user":   user,
-			"token":  "dummy-session-token", // In production, generate a real JWT
-		})
+		return
 	}
+
+	user, err := h.challengeStore.GetUser(req.Username)
+	if err != nil || user.Password != req.Password {
+		http.Error(w, "invalid username or password", http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "logged-in",
+		"user":   user,
+		"token":  "dummy-session-token",
+	})
 }
 
 func (h *HTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +101,14 @@ func (h *HTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) handleQCOW2Upload(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	if !isAdmin(user) {
+		http.Error(w, "admin access required", http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -118,6 +142,10 @@ func (h *HTTPHandler) handleQCOW2Upload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		ctfs, err := h.challengeStore.ListCTFs()
@@ -125,8 +153,12 @@ func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to list ctfs", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, ctfs)
+		writeJSON(w, http.StatusOK, filterCTFsForUser(ctfs, user))
 	case http.MethodPost:
+		if !isAdmin(user) {
+			http.Error(w, "admin access required", http.StatusForbidden)
+			return
+		}
 		var ctf storage.CTF
 		if err := json.NewDecoder(r.Body).Decode(&ctf); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -153,6 +185,8 @@ func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 		ctf.CreatedAt = time.Now().UTC()
 		ctf.UpdatedAt = ctf.CreatedAt
 		ctf.Visibility = normalizeCTFVisibility(ctf.Visibility, storage.CTFVisibilityPrivate)
+		ctf.Maker = user.Username
+		ctf.OwnerID = user.Username
 		for i := range ctf.Challenges {
 			if strings.TrimSpace(ctf.Challenges[i].Title) == "" {
 				http.Error(w, "each question requires a name", http.StatusBadRequest)
@@ -175,6 +209,10 @@ func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
 	trimmed := strings.TrimPrefix(r.URL.Path, "/api/ctfs/")
 	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
 	if len(parts) < 1 || parts[0] == "" {
@@ -190,15 +228,20 @@ func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "ctf not found", http.StatusNotFound)
 				return
 			}
+			if !canViewCTF(user, ctf) {
+				http.Error(w, "ctf not accessible", http.StatusForbidden)
+				return
+			}
 			writeJSON(w, http.StatusOK, ctf)
 			return
 		case http.MethodPut, http.MethodPatch:
-			h.handleUpdateCTF(w, r, ctfID)
+			h.handleUpdateCTF(w, r, ctfID, user)
 			return
 		}
 		http.NotFound(w, r)
 		return
 	}
+
 	action := parts[1]
 	ctf, err := h.challengeStore.GetCTF(ctfID)
 	if err != nil {
@@ -207,6 +250,10 @@ func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
 	}
 	switch action {
 	case "publish":
+		if !canEditCTFUser(user, ctf) {
+			http.Error(w, "only the ctf creator can publish", http.StatusForbidden)
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -219,6 +266,10 @@ func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, ctf)
 	case "disable":
+		if !canEditCTFUser(user, ctf) {
+			http.Error(w, "only the ctf creator can disable", http.StatusForbidden)
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -230,18 +281,48 @@ func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, ctf)
+	case "telemetry":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !canEditCTFUser(user, ctf) {
+			http.Error(w, "only the ctf creator can view telemetry", http.StatusForbidden)
+			return
+		}
+		events, err := h.challengeStore.ListTelemetry(ctfID)
+		if err != nil {
+			http.Error(w, "failed to load telemetry", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, events)
+	case "scores":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !canEditCTFUser(user, ctf) {
+			http.Error(w, "only the ctf creator can view scores", http.StatusForbidden)
+			return
+		}
+		scores, err := h.challengeStore.GetScores(ctfID)
+		if err != nil {
+			http.Error(w, "failed to load scores", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, scores)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (h *HTTPHandler) handleUpdateCTF(w http.ResponseWriter, r *http.Request, ctfID string) {
+func (h *HTTPHandler) handleUpdateCTF(w http.ResponseWriter, r *http.Request, ctfID string, user *storage.User) {
 	existing, err := h.challengeStore.GetCTF(ctfID)
 	if err != nil {
 		http.Error(w, "ctf not found", http.StatusNotFound)
 		return
 	}
-	if !canEditCTF(r, existing) {
+	if !canEditCTFUser(user, existing) {
 		http.Error(w, "only the ctf creator can edit this ctf", http.StatusForbidden)
 		return
 	}
@@ -257,6 +338,8 @@ func (h *HTTPHandler) handleUpdateCTF(w http.ResponseWriter, r *http.Request, ct
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	updated.Maker = existing.Maker
+	updated.OwnerID = existing.OwnerID
 	if err := h.challengeStore.CreateCTF(updated); err != nil {
 		http.Error(w, "failed to update ctf", http.StatusInternalServerError)
 		return
@@ -265,6 +348,10 @@ func (h *HTTPHandler) handleUpdateCTF(w http.ResponseWriter, r *http.Request, ct
 }
 
 func (h *HTTPHandler) handleChallenges(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		challenges, err := h.challengeStore.ListChallenges()
@@ -274,6 +361,10 @@ func (h *HTTPHandler) handleChallenges(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, challenges)
 	case http.MethodPost:
+		if !isAdmin(user) {
+			http.Error(w, "admin access required", http.StatusForbidden)
+			return
+		}
 		var challenge storage.Challenge
 		if err := json.NewDecoder(r.Body).Decode(&challenge); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -286,6 +377,10 @@ func (h *HTTPHandler) handleChallenges(w http.ResponseWriter, r *http.Request) {
 		ctf, err := h.challengeStore.GetCTF(challenge.CTFID)
 		if err != nil {
 			http.Error(w, "ctf not found", http.StatusNotFound)
+			return
+		}
+		if !canEditCTFUser(user, ctf) {
+			http.Error(w, "only the ctf creator can edit questions", http.StatusForbidden)
 			return
 		}
 		challenge = storage.NormalizeChallengeForMaker(challenge, ctf.VMConfig)
@@ -308,12 +403,16 @@ func (h *HTTPHandler) handleChallenges(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) handleSessions(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodPost:
-		h.handleCreateSession(w, r)
+		h.handleCreateSession(w, r, user)
 	case http.MethodGet:
 		active := h.sessionManager.GetActiveSession()
-		if active == nil {
+		if active == nil || (active.UserID != "" && active.UserID != user.Username && !isAdmin(user)) {
 			writeJSON(w, http.StatusOK, nil)
 			return
 		}
@@ -324,6 +423,10 @@ func (h *HTTPHandler) handleSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) handleSessionActions(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
 	trimmed := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
 	if len(parts) < 1 || parts[0] == "" {
@@ -333,7 +436,7 @@ func (h *HTTPHandler) handleSessionActions(w http.ResponseWriter, r *http.Reques
 	sessionID := parts[0]
 	if len(parts) == 1 {
 		if r.Method == http.MethodGet {
-			h.handleGetSession(w, r, sessionID)
+			h.handleGetSession(w, r, sessionID, user)
 			return
 		}
 		http.NotFound(w, r)
@@ -342,15 +445,15 @@ func (h *HTTPHandler) handleSessionActions(w http.ResponseWriter, r *http.Reques
 	action := parts[1]
 	switch action {
 	case "stop", "end":
-		h.handleStopSession(w, r, sessionID)
+		h.handleStopSession(w, r, sessionID, user)
 	case "submit-answer", "submit":
-		h.handleSubmitAnswer(w, r, sessionID)
+		h.handleSubmitAnswer(w, r, sessionID, user)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request, user *storage.User) {
 	var req struct {
 		ChallengeID string `json:"challenge_id"`
 		SessionID   string `json:"session_id,omitempty"`
@@ -364,12 +467,27 @@ func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// If client provided a session id, and that session exists and is active,
-	// keep the VM running and switch the active validator when the requested
-	// challenge belongs to the same CTF. This lets multi-question CTFs share one
-	// heavy qcow2 boot.
+	challenge, err := h.challengeStore.GetChallenge(req.ChallengeID)
+	if err != nil {
+		http.Error(w, "challenge not found", http.StatusNotFound)
+		return
+	}
+	ctf, err := h.challengeStore.GetCTF(challenge.CTFID)
+	if err != nil {
+		http.Error(w, "ctf not found", http.StatusNotFound)
+		return
+	}
+	if !canViewCTF(user, ctf) {
+		http.Error(w, "ctf not accessible", http.StatusForbidden)
+		return
+	}
+
 	if req.SessionID != "" {
 		if s, err := h.sessionManager.GetSession(req.SessionID); err == nil && s.Status == storage.SessionStatusActive {
+			if s.UserID != "" && s.UserID != user.Username && !isAdmin(user) {
+				http.Error(w, "session belongs to another user", http.StatusForbidden)
+				return
+			}
 			if sameActiveChallengeSession(s, req.ChallengeID) {
 				writeJSON(w, http.StatusOK, s)
 				return
@@ -393,9 +511,8 @@ func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	session, err := h.sessionManager.StartSessionWithID(req.ChallengeID, req.SessionID)
+	session, err := h.sessionManager.StartSessionWithID(req.ChallengeID, req.SessionID, user.Username)
 	if err != nil {
-		// If a session already exists (race), try to return it.
 		if errors.Is(err, service.ErrSessionExists) {
 			if s, ge := h.sessionManager.GetSession(req.SessionID); ge == nil {
 				writeJSON(w, http.StatusOK, s)
@@ -408,8 +525,6 @@ func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Log session creation for debugging and observability.
-	// Note: session.Seed is omitted from JSON by design.
 	log.Printf("session created id=%s challenge=%s runtime=%s", session.ID, session.ChallengeID, session.RuntimePath)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":           session.ID,
@@ -427,31 +542,48 @@ func sameActiveChallengeSession(session *storage.Session, challengeID string) bo
 		session.ChallengeID == challengeID
 }
 
-func (h *HTTPHandler) handleGetSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (h *HTTPHandler) handleGetSession(w http.ResponseWriter, r *http.Request, sessionID string, user *storage.User) {
 	session, err := h.sessionManager.GetSession(sessionID)
 	if err != nil {
 		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if session.UserID != "" && session.UserID != user.Username && !isAdmin(user) {
+		http.Error(w, "session belongs to another user", http.StatusForbidden)
 		return
 	}
 	writeJSON(w, http.StatusOK, session)
 }
 
 func (h *HTTPHandler) handleGetActiveSession(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	active := h.sessionManager.GetActiveSession()
-	if active == nil {
+	if active == nil || (active.UserID != "" && active.UserID != user.Username && !isAdmin(user)) {
 		writeJSON(w, http.StatusOK, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, active)
 }
 
-func (h *HTTPHandler) handleStopSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (h *HTTPHandler) handleStopSession(w http.ResponseWriter, r *http.Request, sessionID string, user *storage.User) {
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session, err := h.sessionManager.GetSession(sessionID)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if session.UserID != "" && session.UserID != user.Username && !isAdmin(user) {
+		http.Error(w, "session belongs to another user", http.StatusForbidden)
 		return
 	}
 	if err := h.sessionManager.EndSession(sessionID); err != nil {
@@ -469,19 +601,30 @@ func (h *HTTPHandler) handleStopSession(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
-func (h *HTTPHandler) handleSubmitAnswer(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (h *HTTPHandler) handleSubmitAnswer(w http.ResponseWriter, r *http.Request, sessionID string, user *storage.User) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	session, err := h.sessionManager.GetSession(sessionID)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if session.UserID != "" && session.UserID != user.Username && !isAdmin(user) {
+		http.Error(w, "session belongs to another user", http.StatusForbidden)
+		return
+	}
+
 	var req struct {
-		Answer string `json:"answer"`
+		Answer      string `json:"answer"`
+		LastCommand string `json:"last_command"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	correct, submission, err := h.sessionManager.SubmitAnswer(sessionID, req.Answer)
+	correct, submission, err := h.sessionManager.SubmitAnswer(sessionID, req.Answer, req.LastCommand)
 	if err != nil {
 		if errors.Is(err, service.ErrSessionNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -589,17 +732,75 @@ func normalizeCTFStatus(value, fallback string) string {
 	return storage.CTFStatusDraft
 }
 
-func canEditCTF(r *http.Request, ctf storage.CTF) bool {
+func normalizeRole(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "admin", "user":
+		return value
+	default:
+		return "user"
+	}
+}
+
+func (h *HTTPHandler) requireUser(w http.ResponseWriter, r *http.Request) (*storage.User, bool) {
 	username := strings.TrimSpace(r.Header.Get("X-VMRunner-User"))
-	role := strings.TrimSpace(r.Header.Get("X-VMRunner-Role"))
+	role := normalizeRole(r.Header.Get("X-VMRunner-Role"))
+	if username == "" || role == "" {
+		http.Error(w, "login required", http.StatusUnauthorized)
+		return nil, false
+	}
+	user, err := h.challengeStore.GetUser(username)
+	if err != nil {
+		http.Error(w, "invalid user", http.StatusUnauthorized)
+		return nil, false
+	}
+	if normalizeRole(user.Role) != role {
+		http.Error(w, "invalid role", http.StatusForbidden)
+		return nil, false
+	}
+	return user, true
+}
+
+func isAdmin(user *storage.User) bool {
+	return user != nil && normalizeRole(user.Role) == "admin"
+}
+
+func canEditCTFUser(user *storage.User, ctf storage.CTF) bool {
+	if user == nil {
+		return false
+	}
 	creator := strings.TrimSpace(ctf.Maker)
 	if creator == "" {
 		creator = strings.TrimSpace(ctf.OwnerID)
 	}
 	if creator == "" || creator == "unknown" || creator == "system" {
-		return role == "admin"
+		return isAdmin(user)
 	}
-	return username != "" && username == creator
+	return user.Username != "" && user.Username == creator
+}
+
+func canViewCTF(user *storage.User, ctf storage.CTF) bool {
+	if user == nil {
+		return false
+	}
+	if isAdmin(user) || canEditCTFUser(user, ctf) {
+		return true
+	}
+	return ctf.Visibility == storage.CTFVisibilityPublic
+}
+
+func filterCTFsForUser(ctfs []storage.CTF, user *storage.User) []storage.CTF {
+	if user == nil {
+		return []storage.CTF{}
+	}
+	filtered := make([]storage.CTF, 0, len(ctfs))
+	for _, ctf := range ctfs {
+		if canViewCTF(user, ctf) {
+			filtered = append(filtered, ctf)
+		}
+	}
+	sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].CreatedAt.After(filtered[j].CreatedAt) })
+	return filtered
 }
 
 func ensureUniqueChallengeIDs(challenges []storage.Challenge) {

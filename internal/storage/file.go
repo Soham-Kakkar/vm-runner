@@ -106,27 +106,54 @@ type Session struct {
 }
 
 type User struct {
-	Username  string    `json:"username"`
-	Password  string    `json:"password"` // In a real app, this should be hashed
-	Role      string    `json:"role"`     // "admin" or "user"
-	CreatedAt time.Time `json:"created_at"`
+	Username   string    `json:"username"`
+	Password   string    `json:"password"` // In a real app, this should be hashed
+	Role       string    `json:"role"`     // "admin" or "user"
+	Name       string    `json:"name"`
+	ExternalID string    `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type TelemetryEvent struct {
+	ID          string    `json:"id"`
+	CTFID       string    `json:"ctf_id"`
+	SessionID   string    `json:"session_id"`
+	ChallengeID string    `json:"challenge_id"`
+	User        string    `json:"user"`
+	LastCommand string    `json:"last_command"`
+	IsCorrect   bool      `json:"is_correct"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type ScoreEntry struct {
+	User        string    `json:"user"`
+	Score       int       `json:"score"`
+	LastUpdated time.Time `json:"last_updated"`
+}
+
+type Scoreboard struct {
+	CTFID     string       `json:"ctf_id"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Scores    []ScoreEntry `json:"scores"`
 }
 
 type FileStore struct {
-	basePath   string
-	ctfPath    string
-	userPath   string
-	legacyPath string
-	uploadPath string
+	basePath      string
+	ctfPath       string
+	userPath      string
+	legacyPath    string
+	uploadPath    string
+	telemetryPath string
 }
 
 func NewFileStore(basePath string) *FileStore {
 	return &FileStore{
-		basePath:   basePath,
-		ctfPath:    filepath.Join(basePath, "ctfs"),
-		userPath:   filepath.Join(basePath, "users.json"),
-		legacyPath: filepath.Join(basePath, "challenges"),
-		uploadPath: filepath.Join(basePath, "uploads", "qcow2"),
+		basePath:      basePath,
+		ctfPath:       filepath.Join(basePath, "ctfs"),
+		userPath:      filepath.Join(basePath, "users.json"),
+		legacyPath:    filepath.Join(basePath, "challenges"),
+		uploadPath:    filepath.Join(basePath, "uploads", "qcow2"),
+		telemetryPath: filepath.Join(basePath, "telemetry"),
 	}
 }
 
@@ -316,7 +343,7 @@ func (s *FileStore) CreateUser(user User) error {
 		users = []User{}
 	}
 	for _, u := range users {
-		if u.Username == user.Username {
+		if u.Username == user.Username || u.ExternalID != "" && u.ExternalID == user.ExternalID {
 			return fmt.Errorf("user already exists")
 		}
 	}
@@ -346,6 +373,118 @@ func (s *FileStore) saveUsers(users []User) error {
 		return err
 	}
 	return os.WriteFile(s.userPath, data, 0o644)
+}
+
+func (s *FileStore) telemetryDir(ctfID string) string {
+	return filepath.Join(s.telemetryPath, ctfID)
+}
+
+func (s *FileStore) telemetryEventsPath(ctfID string) string {
+	return filepath.Join(s.telemetryDir(ctfID), "events.json")
+}
+
+func (s *FileStore) telemetryScoresPath(ctfID string) string {
+	return filepath.Join(s.telemetryDir(ctfID), "scores.json")
+}
+
+func (s *FileStore) AppendTelemetry(ctfID string, event TelemetryEvent) error {
+	if ctfID == "" {
+		return fmt.Errorf("ctf id is required")
+	}
+	if err := os.MkdirAll(s.telemetryDir(ctfID), 0o755); err != nil {
+		return err
+	}
+	events, err := s.ListTelemetry(ctfID)
+	if err != nil {
+		return err
+	}
+	if event.ID == "" {
+		event.ID, err = NanoID(10)
+		if err != nil {
+			return err
+		}
+	}
+	event.CTFID = ctfID
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	events = append(events, event)
+	data, err := MarshalIndentNoEscape(events)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.telemetryEventsPath(ctfID), data, 0o644)
+}
+
+func (s *FileStore) ListTelemetry(ctfID string) ([]TelemetryEvent, error) {
+	path := s.telemetryEventsPath(ctfID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return []TelemetryEvent{}, nil
+		}
+		return nil, err
+	}
+	var events []TelemetryEvent
+	if err := json.Unmarshal(data, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (s *FileStore) GetScores(ctfID string) (Scoreboard, error) {
+	path := s.telemetryScoresPath(ctfID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Scoreboard{CTFID: ctfID, Scores: []ScoreEntry{}}, nil
+		}
+		return Scoreboard{}, err
+	}
+	var board Scoreboard
+	if err := json.Unmarshal(data, &board); err != nil {
+		return Scoreboard{}, err
+	}
+	if board.CTFID == "" {
+		board.CTFID = ctfID
+	}
+	return board, nil
+}
+
+func (s *FileStore) IncrementScore(ctfID, username string) (Scoreboard, error) {
+	if ctfID == "" || username == "" {
+		return Scoreboard{}, fmt.Errorf("ctf id and username are required")
+	}
+	if err := os.MkdirAll(s.telemetryDir(ctfID), 0o755); err != nil {
+		return Scoreboard{}, err
+	}
+	board, err := s.GetScores(ctfID)
+	if err != nil {
+		return Scoreboard{}, err
+	}
+	now := time.Now().UTC()
+	updated := false
+	for i := range board.Scores {
+		if board.Scores[i].User == username {
+			board.Scores[i].Score++
+			board.Scores[i].LastUpdated = now
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		board.Scores = append(board.Scores, ScoreEntry{User: username, Score: 1, LastUpdated: now})
+	}
+	board.CTFID = ctfID
+	board.UpdatedAt = now
+	data, err := MarshalIndentNoEscape(board)
+	if err != nil {
+		return Scoreboard{}, err
+	}
+	if err := os.WriteFile(s.telemetryScoresPath(ctfID), data, 0o644); err != nil {
+		return Scoreboard{}, err
+	}
+	return board, nil
 }
 
 func (s *FileStore) ListCTFs() ([]CTF, error) {
