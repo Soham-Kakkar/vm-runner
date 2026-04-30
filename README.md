@@ -46,16 +46,18 @@ VM Runner is a Go-based CTF session platform for launching QEMU-backed challenge
    ```bash
    go build -o vmrunner ./cmd/vmrunner/main.go
    ```
-4. Define your CTFs in `data/ctfs/*.json`.
-5. Start the server:
+4. Build a challenge qcow2 from an ISO by following `docs/ISO_TO_QCOW2.md`.
+5. Define your CTFs in the web maker or in `data/ctfs/*.json`.
+6. Start the server:
    ```bash
    ./server
    ```
-6. Access the dashboard at `http://localhost:8080`.
+7. Access the dashboard at `http://localhost:8080`.
 
 ### API Overview
 - `GET /api/ctfs`
 - `POST /api/ctfs`
+- `PUT /api/ctfs/:id`
 - `POST /api/uploads/qcow2`
 - `POST /api/ctfs/:id/publish`
 - `POST /api/ctfs/:id/disable`

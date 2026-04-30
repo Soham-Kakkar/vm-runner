@@ -2,7 +2,7 @@
 set -eu
 
 SHARE_DIR="${SHARE_DIR:-/mnt/share}"
-FLAG_ROOT="${FLAG_ROOT:-/var/lib/vmrunner/challenges}"
+FLAG_ROOT="${FLAG_ROOT:-/home/ctf}"
 BASE_IMAGE="${BASE_IMAGE:-/opt/ctf/abc_base.jpg}"
 
 if [ "$(id -u)" != "0" ]; then

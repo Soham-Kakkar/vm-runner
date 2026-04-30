@@ -8,7 +8,9 @@ depend() {
 
 start() {
 	ebegin "placing VMRunner flags"
-	install -d -o vmrunner -g vmrunner -m 0750 /run/vmrunner /var/lib/vmrunner/challenges
+	flag_root="${FLAG_ROOT:-/home/ctf}"
+	install -d -o vmrunner -g vmrunner -m 0750 /run/vmrunner
+	install -d -o vmrunner -g ctf -m 2750 "$flag_root"
 	modprobe 9pnet_virtio 2>/dev/null || true
 	mkdir -p /mnt/vmrunner
 	if ! grep -qs " /mnt/vmrunner " /proc/mounts; then
@@ -19,8 +21,8 @@ start() {
 	chmod 0400 /run/vmrunner/seed
 	VMRUNNER_BIN="${VMRUNNER_BIN:-/usr/local/bin/vmrunner}" \
 	SEED_PATH="${SEED_PATH:-/run/vmrunner/seed}" \
-	FLAG_ROOT="${FLAG_ROOT:-/var/lib/vmrunner/challenges}" \
+	FLAG_ROOT="$flag_root" \
 		start-stop-daemon --start --exec /usr/local/bin/place_flags.sh \
-			--chuid vmrunner:vmrunner --wait 1000
+			--chuid vmrunner:ctf --wait 1000
 	eend $?
 }

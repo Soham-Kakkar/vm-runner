@@ -21,9 +21,10 @@ import (
 )
 
 var (
-	ErrSessionExists   = errors.New("a session is already active")
-	ErrSessionNotFound = errors.New("session not found")
-	ErrSessionClosed   = errors.New("session is not active")
+	ErrSessionExists     = errors.New("a session is already active")
+	ErrSessionNotFound   = errors.New("session not found")
+	ErrSessionClosed     = errors.New("session is not active")
+	ErrChallengeMismatch = errors.New("challenge belongs to a different ctf")
 )
 
 type sessionRecord struct {
@@ -264,6 +265,47 @@ func (sm *SessionManager) EndSession(sessionID string) error {
 }
 
 func (sm *SessionManager) GetSession(sessionID string) (*storage.Session, error) {
+	return sm.copySession(sessionID)
+}
+
+func (sm *SessionManager) SwitchSessionChallenge(sessionID, challengeID string) (*storage.Session, error) {
+	challenge, err := sm.challengeStore.GetChallenge(challengeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get challenge: %w", err)
+	}
+	record, err := sm.getRecord(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if record.session.Status != storage.SessionStatusActive {
+		return nil, ErrSessionClosed
+	}
+
+	currentCTFID := record.session.Challenge.CTFID
+	if currentCTFID == "" {
+		current, err := sm.challengeStore.GetChallenge(record.session.ChallengeID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current challenge: %w", err)
+		}
+		currentCTFID = current.CTFID
+	}
+	if challenge.CTFID != currentCTFID {
+		return nil, ErrChallengeMismatch
+	}
+
+	now := time.Now().UTC()
+	sm.mu.Lock()
+	record.session.ChallengeID = challenge.ID
+	record.session.Challenge = challenge
+	record.session.LastActivity = &now
+	if record.session.ExpiresAt.Before(now) {
+		record.session.ExpiresAt = now.Add(30 * time.Minute)
+	}
+	sm.mu.Unlock()
+
+	if err := sm.saveSessionToDisk(record.session); err != nil {
+		log.Printf("warning: failed to persist challenge switch for session %s: %v", sessionID, err)
+	}
 	return sm.copySession(sessionID)
 }
 
