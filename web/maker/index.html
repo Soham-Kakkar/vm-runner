@@ -76,7 +76,7 @@
             <div class="stack">
               <div class="form-group">
                 <label>Base QCOW2 Upload</label>
-                <input type="file" id="vm-image-file" accept=".qcow2" required>
+                <input type="file" id="vm-image-file" accept=".qcow2">
                 <p id="upload-status" class="muted" style="font-size: 12px;"></p>
               </div>
               <div class="form-row" style="grid-template-columns: 1fr;">
@@ -107,8 +107,11 @@
 
   <template id="challenge-template">
     <div class="challenge-editor">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
-        <h4 class="challenge-num">Question #1</h4>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 16px; gap: 16px;">
+        <div>
+          <h4 class="challenge-num">Question #1</h4>
+          <p class="challenge-id muted hidden" style="font-size: 12px;"></p>
+        </div>
         <button type="button" class="danger remove-btn" style="padding: 2px 8px; font-size: 12px;">Remove</button>
       </div>
       <div class="stack">

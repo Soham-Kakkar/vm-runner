@@ -149,14 +149,10 @@ func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctf.VMConfig = vmConfig
-		if ctf.Status == "" {
-			ctf.Status = storage.CTFStatusDraft
-		}
+		ctf.Status = normalizeCTFStatus(ctf.Status, storage.CTFStatusDraft)
 		ctf.CreatedAt = time.Now().UTC()
 		ctf.UpdatedAt = ctf.CreatedAt
-		if ctf.Visibility == "" {
-			ctf.Visibility = storage.CTFVisibilityPrivate
-		}
+		ctf.Visibility = normalizeCTFVisibility(ctf.Visibility, storage.CTFVisibilityPrivate)
 		for i := range ctf.Challenges {
 			if strings.TrimSpace(ctf.Challenges[i].Title) == "" {
 				http.Error(w, "each question requires a name", http.StatusBadRequest)
@@ -187,13 +183,17 @@ func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctfID := parts[0]
 	if len(parts) == 1 {
-		if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
 			ctf, err := h.challengeStore.GetCTF(ctfID)
 			if err != nil {
 				http.Error(w, "ctf not found", http.StatusNotFound)
 				return
 			}
 			writeJSON(w, http.StatusOK, ctf)
+			return
+		case http.MethodPut, http.MethodPatch:
+			h.handleUpdateCTF(w, r, ctfID)
 			return
 		}
 		http.NotFound(w, r)
@@ -233,6 +233,35 @@ func (h *HTTPHandler) handleCTFActions(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h *HTTPHandler) handleUpdateCTF(w http.ResponseWriter, r *http.Request, ctfID string) {
+	existing, err := h.challengeStore.GetCTF(ctfID)
+	if err != nil {
+		http.Error(w, "ctf not found", http.StatusNotFound)
+		return
+	}
+	if !canEditCTF(r, existing) {
+		http.Error(w, "only the ctf creator can edit this ctf", http.StatusForbidden)
+		return
+	}
+
+	var req storage.CTF
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	updated, err := normalizeCTFUpdate(existing, req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := h.challengeStore.CreateCTF(updated); err != nil {
+		http.Error(w, "failed to update ctf", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (h *HTTPHandler) handleChallenges(w http.ResponseWriter, r *http.Request) {
@@ -336,13 +365,31 @@ func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 	}
 
 	// If client provided a session id, and that session exists and is active,
-	// return it immediately so the client can reattach. Otherwise, attempt to
-	// start a new session using the provided id (if any).
+	// keep the VM running and switch the active validator when the requested
+	// challenge belongs to the same CTF. This lets multi-question CTFs share one
+	// heavy qcow2 boot.
 	if req.SessionID != "" {
 		if s, err := h.sessionManager.GetSession(req.SessionID); err == nil && s.Status == storage.SessionStatusActive {
-			// Return existing active session
-			writeJSON(w, http.StatusOK, s)
-			return
+			if sameActiveChallengeSession(s, req.ChallengeID) {
+				writeJSON(w, http.StatusOK, s)
+				return
+			}
+			switched, err := h.sessionManager.SwitchSessionChallenge(req.SessionID, req.ChallengeID)
+			if err == nil {
+				writeJSON(w, http.StatusOK, switched)
+				return
+			}
+			if errors.Is(err, service.ErrChallengeMismatch) {
+				if stopErr := h.sessionManager.EndSession(req.SessionID); stopErr != nil && !errors.Is(stopErr, service.ErrSessionClosed) {
+					log.Printf("warning: failed to stop mismatched session %s before challenge switch: %v", req.SessionID, stopErr)
+				}
+				req.SessionID = ""
+			} else if errors.Is(err, service.ErrSessionClosed) || errors.Is(err, service.ErrSessionNotFound) {
+				req.SessionID = ""
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 
@@ -372,6 +419,12 @@ func (h *HTTPHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 		"vnc_url":      "/vnc/session/" + session.ID,
 		"session":      session,
 	})
+}
+
+func sameActiveChallengeSession(session *storage.Session, challengeID string) bool {
+	return session != nil &&
+		session.Status == storage.SessionStatusActive &&
+		session.ChallengeID == challengeID
 }
 
 func (h *HTTPHandler) handleGetSession(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -453,6 +506,100 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
 	_ = encoder.Encode(payload)
+}
+
+func normalizeCTFUpdate(existing storage.CTF, req storage.CTF) (storage.CTF, error) {
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		return storage.CTF{}, fmt.Errorf("ctf title is required")
+	}
+
+	vmInput := req.VMConfig
+	if strings.TrimSpace(vmInput.ImagePath) == "" {
+		vmInput.ImagePath = existing.VMConfig.ImagePath
+	}
+	if strings.TrimSpace(vmInput.DisplayType) == "" {
+		vmInput.DisplayType = existing.VMConfig.DisplayType
+	}
+	vmConfig, err := storage.NormalizeMakerVMConfig(vmInput)
+	if err != nil {
+		return storage.CTF{}, err
+	}
+
+	now := time.Now().UTC()
+	if existing.CreatedAt.IsZero() {
+		existing.CreatedAt = now
+	}
+	updated := existing
+	updated.Title = title
+	updated.Visibility = normalizeCTFVisibility(req.Visibility, existing.Visibility)
+	updated.Status = normalizeCTFStatus(req.Status, existing.Status)
+	updated.VMConfig = vmConfig
+	updated.UpdatedAt = now
+
+	existingChallenges := make(map[string]storage.Challenge, len(existing.Challenges))
+	for _, challenge := range existing.Challenges {
+		if challenge.ID != "" {
+			existingChallenges[challenge.ID] = challenge
+		}
+	}
+
+	updated.Challenges = make([]storage.Challenge, 0, len(req.Challenges))
+	for i := range req.Challenges {
+		if strings.TrimSpace(req.Challenges[i].Title) == "" {
+			return storage.CTF{}, fmt.Errorf("each question requires a name")
+		}
+		challenge := storage.NormalizeChallengeForMaker(req.Challenges[i], vmConfig)
+		challenge.CTFID = existing.ID
+		challenge.UpdatedAt = now
+		if old, ok := existingChallenges[challenge.ID]; ok && !old.CreatedAt.IsZero() {
+			challenge.CreatedAt = old.CreatedAt
+		} else {
+			challenge.CreatedAt = now
+		}
+		updated.Challenges = append(updated.Challenges, challenge)
+	}
+	ensureUniqueChallengeIDs(updated.Challenges)
+	return updated, nil
+}
+
+func normalizeCTFVisibility(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case storage.CTFVisibilityPublic, storage.CTFVisibilityPrivate:
+		return value
+	case "":
+		if fallback != "" {
+			return fallback
+		}
+	}
+	return storage.CTFVisibilityPrivate
+}
+
+func normalizeCTFStatus(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case storage.CTFStatusDraft, storage.CTFStatusPublished, storage.CTFStatusDisabled:
+		return value
+	case "":
+		if fallback != "" {
+			return fallback
+		}
+	}
+	return storage.CTFStatusDraft
+}
+
+func canEditCTF(r *http.Request, ctf storage.CTF) bool {
+	username := strings.TrimSpace(r.Header.Get("X-VMRunner-User"))
+	role := strings.TrimSpace(r.Header.Get("X-VMRunner-Role"))
+	creator := strings.TrimSpace(ctf.Maker)
+	if creator == "" {
+		creator = strings.TrimSpace(ctf.OwnerID)
+	}
+	if creator == "" || creator == "unknown" || creator == "system" {
+		return role == "admin"
+	}
+	return username != "" && username == creator
 }
 
 func ensureUniqueChallengeIDs(challenges []storage.Challenge) {

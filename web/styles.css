@@ -77,7 +77,7 @@ button.primary:hover, .btn.primary:hover { background-color: var(--color-primary
 button.danger, .btn.danger { color: var(--color-danger); }
 button.danger:hover, .btn.danger:hover { background-color: var(--color-danger); color: #fff; border-color: var(--color-danger); }
 
-input[type="text"], input[type="password"], textarea, select {
+input[type="text"], input[type="password"], input[type="number"], input[type="file"], textarea, select {
   background-color: var(--bg-input);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);

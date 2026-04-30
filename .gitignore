@@ -1,7 +1,6 @@
 data
-*.md
-!README.md
-!docs/*.md
 bin/
 .env
-ok 
+/images
+*.iso
+*.qcow2 

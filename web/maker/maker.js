@@ -6,31 +6,78 @@ document.addEventListener('DOMContentLoaded', () => {
   const uploadInput = document.getElementById('vm-image-file');
   const uploadStatus = document.getElementById('upload-status');
   const APP_URL = window.location.protocol === 'file:' ? 'http://localhost:8080' : '';
+  const params = new URLSearchParams(window.location.search);
+  const editID = params.get('id');
 
   let challengeCount = 0;
+  let existingCTF = null;
 
-  function addChallenge() {
+  function getUser() {
+    return JSON.parse(localStorage.getItem('vmrunner_user') || '{}');
+  }
+
+  function authHeaders(extra = {}) {
+    const user = getUser();
+    return {
+      ...extra,
+      'X-VMRunner-User': user.username || '',
+      'X-VMRunner-Role': user.role || ''
+    };
+  }
+
+  function canEditCTF(ctf) {
+    const user = getUser();
+    const creator = String(ctf.maker || ctf.owner_id || '').trim();
+    if (!creator || creator === 'unknown' || creator === 'system') {
+      return user.role === 'admin';
+    }
+    return user.username === creator;
+  }
+
+  function syncValidatorFields(container) {
+    const validatorSelect = container.querySelector('.ch-validator');
+    const staticField = container.querySelector('.static-only');
+    const hmacField = container.querySelector('.hmac-only');
+    if (validatorSelect.value === 'hmac') {
+      staticField.classList.add('hidden');
+      hmacField.classList.remove('hidden');
+    } else {
+      staticField.classList.remove('hidden');
+      hmacField.classList.add('hidden');
+    }
+  }
+
+  function addChallenge(challenge = {}) {
     challengeCount++;
     const clone = template.content.cloneNode(true);
     const container = clone.querySelector('.challenge-editor');
-    container.querySelector('.challenge-num').textContent = `Question #${challengeCount}`;
-    container.querySelector('.ch-qno').value = String(challengeCount);
+    container.dataset.challengeId = challenge.id || '';
+
+    const idMeta = container.querySelector('.challenge-id');
+    if (challenge.id) {
+      idMeta.textContent = `ID: ${challenge.id}`;
+      idMeta.classList.remove('hidden');
+    }
+
+    const questionNo = challenge.question_no || challengeCount;
+    container.querySelector('.challenge-num').textContent = `Question #${questionNo}`;
+    container.querySelector('.ch-qno').value = String(questionNo);
+    container.querySelector('.ch-title').value = challenge.title || '';
+    container.querySelector('.ch-desc').value = challenge.description || '';
     
-    const validatorSelect = clone.querySelector('.ch-validator');
-    const staticField = clone.querySelector('.static-only');
-    const hmacField = clone.querySelector('.hmac-only');
+    const validatorSelect = container.querySelector('.ch-validator');
+    validatorSelect.value = challenge.validator || 'hmac';
+    container.querySelector('.ch-flag').value = challenge.flag || '';
+    container.querySelector('.ch-template').value = challenge.template || 'flag{<hmac>}';
+    syncValidatorFields(container);
 
     validatorSelect.addEventListener('change', () => {
-      if (validatorSelect.value === 'hmac') {
-        staticField.classList.add('hidden');
-        hmacField.classList.remove('hidden');
-      } else {
-        staticField.classList.remove('hidden');
-        hmacField.classList.add('hidden');
-      }
+      syncValidatorFields(container);
     });
 
-    clone.querySelector('.remove-btn').addEventListener('click', () => {
+    container.querySelector('.ch-qno').addEventListener('input', updateChallengeNumbers);
+
+    container.querySelector('.remove-btn').addEventListener('click', () => {
       container.remove();
       updateChallengeNumbers();
     });
@@ -42,17 +89,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const containers = ctfList.querySelectorAll('.challenge-editor');
     challengeCount = containers.length;
     containers.forEach((c, i) => {
-      c.querySelector('.challenge-num').textContent = `Question #${i + 1}`;
+      const questionNo = parseInt(c.querySelector('.ch-qno').value, 10) || i + 1;
+      c.querySelector('.challenge-num').textContent = `Question #${questionNo}`;
     });
   }
 
-  async function saveCTF() {
-    const user = JSON.parse(localStorage.getItem('vmrunner_user') || '{}');
-    const ctfTitle = document.getElementById('ctf-title').value.trim();
-    if (!ctfTitle) {
-      throw new Error('CTF name is required.');
-    }
-
+  function collectChallenges() {
     const challenges = [];
     const containers = ctfList.querySelectorAll('.challenge-editor');
     containers.forEach(c => {
@@ -60,8 +102,11 @@ document.addEventListener('DOMContentLoaded', () => {
         title: c.querySelector('.ch-title').value.trim(),
         description: c.querySelector('.ch-desc').value,
         validator: c.querySelector('.ch-validator').value,
-        question_no: parseInt(c.querySelector('.ch-qno').value) || 1
+        question_no: parseInt(c.querySelector('.ch-qno').value, 10) || 1
       };
+      if (c.dataset.challengeId) {
+        ch.id = c.dataset.challengeId;
+      }
       if (!ch.title) {
         throw new Error('Each question needs a name.');
       }
@@ -75,13 +120,26 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       challenges.push(ch);
     });
+    if (challenges.length === 0) {
+      throw new Error('Add at least one question.');
+    }
+    return challenges;
+  }
 
+  async function saveCTF() {
+    const user = JSON.parse(localStorage.getItem('vmrunner_user') || '{}');
+    const ctfTitle = document.getElementById('ctf-title').value.trim();
+    if (!ctfTitle) {
+      throw new Error('CTF name is required.');
+    }
+
+    const challenges = collectChallenges();
     const imagePath = await uploadQCOW2();
     const ctf = {
       title: ctfTitle,
       visibility: document.getElementById('ctf-visibility').value,
       status: document.getElementById('ctf-status').value,
-      maker: user.username || 'unknown',
+      maker: editID && existingCTF ? existingCTF.maker : user.username || 'unknown',
       vm_config: {
         image_path: imagePath,
         display_type: document.getElementById('vm-display').value
@@ -91,16 +149,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving...';
-      const resp = await fetch(`${APP_URL}/api/ctfs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      saveBtn.textContent = editID ? 'Saving changes...' : 'Saving...';
+      const resp = await fetch(editID ? `${APP_URL}/api/ctfs/${encodeURIComponent(editID)}` : `${APP_URL}/api/ctfs`, {
+        method: editID ? 'PUT' : 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(ctf)
       });
       if (resp.ok) {
         const saved = await resp.json();
-        alert(`CTF saved as ${saved.id}`);
-        window.location.href = '/';
+        alert(editID ? 'CTF updated.' : `CTF saved as ${saved.id}`);
+        window.location.href = `/ctf/?id=${encodeURIComponent(saved.id)}`;
       } else {
         const err = await resp.text();
         alert('Error saving CTF: ' + err);
@@ -109,13 +167,16 @@ document.addEventListener('DOMContentLoaded', () => {
       alert('Network error: ' + e.message);
     } finally {
       saveBtn.disabled = false;
-      saveBtn.textContent = 'Save CTF';
+      saveBtn.textContent = editID ? 'Save Changes' : 'Save CTF';
     }
   }
 
   async function uploadQCOW2() {
     const file = uploadInput.files && uploadInput.files[0];
     if (!file) {
+      if (editID && existingCTF?.vm_config?.image_path) {
+        return existingCTF.vm_config.image_path;
+      }
       throw new Error('Choose a base qcow2 file first.');
     }
     if (!file.name.toLowerCase().endsWith('.qcow2')) {
@@ -138,7 +199,43 @@ document.addEventListener('DOMContentLoaded', () => {
     return payload.image_path;
   }
 
-  addBtn.addEventListener('click', addChallenge);
+  async function loadExistingCTF() {
+    if (!editID) {
+      addChallenge();
+      return;
+    }
+
+    document.querySelector('.page-header h2').textContent = 'Edit CTF';
+    document.querySelector('.page-header .muted').textContent = editID;
+    saveBtn.textContent = 'Save Changes';
+    uploadInput.required = false;
+
+    const resp = await fetch(`${APP_URL}/api/ctfs/${encodeURIComponent(editID)}`);
+    if (!resp.ok) {
+      throw new Error('Failed to load CTF for editing.');
+    }
+    existingCTF = await resp.json();
+    if (!canEditCTF(existingCTF)) {
+      alert('Only the original creator can edit this CTF.');
+      window.location.href = '/';
+      return;
+    }
+
+    document.getElementById('ctf-title').value = existingCTF.title || '';
+    document.getElementById('ctf-visibility').value = existingCTF.visibility || 'private';
+    document.getElementById('ctf-status').value = existingCTF.status || 'draft';
+    document.getElementById('vm-display').value = existingCTF.vm_config?.display_type || 'terminal';
+    uploadStatus.textContent = existingCTF.vm_config?.image_path ? `Current image: ${existingCTF.vm_config.image_path}` : '';
+
+    ctfList.innerHTML = '';
+    challengeCount = 0;
+    (existingCTF.challenges || []).forEach(addChallenge);
+    if (challengeCount === 0) {
+      addChallenge();
+    }
+  }
+
+  addBtn.addEventListener('click', () => addChallenge());
   saveBtn.addEventListener('click', async () => {
     try {
       saveBtn.disabled = true;
@@ -146,10 +243,12 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) {
       alert(e.message || 'Failed to save CTF');
       saveBtn.disabled = false;
-      saveBtn.textContent = 'Save CTF';
+      saveBtn.textContent = editID ? 'Save Changes' : 'Save CTF';
     }
   });
 
-  // Add one challenge by default
-  addChallenge();
+  loadExistingCTF().catch(e => {
+    alert(e.message || 'Failed to load maker.');
+    window.location.href = '/';
+  });
 });

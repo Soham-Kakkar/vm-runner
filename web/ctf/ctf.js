@@ -11,6 +11,16 @@ document.addEventListener('DOMContentLoaded', () => {
     return value.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
+  function escapeHTML(value) {
+    return String(value || '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[ch]));
+  }
+
   // session state
   let currentSession = null;
   let ws = null;
@@ -154,14 +164,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function stopSession() {
     if (!currentSession) return;
+    await stopCurrentSession();
+    document.getElementById('session-view').classList.add('hidden');
+    document.getElementById('no-session-msg').classList.remove('hidden');
+  }
+
+  async function stopCurrentSession() {
+    if (!currentSession) return;
     await fetch(`${APP_URL}/api/sessions/${currentSession.id}/stop`, { method: 'POST' });
     if (ws) { try { ws.close() } catch {} ws = null }
     if (rfb) { try { rfb.disconnect() } catch {} rfb = null }
     destroyTerminal();
     currentSession = null;
     clearSessionStorage();
-    document.getElementById('session-view').classList.add('hidden');
-    document.getElementById('no-session-msg').classList.remove('hidden');
   }
 
   document.addEventListener('click', ev => { if (ev.target && ev.target.matches && ev.target.matches('.start')) ev.target.dispatchEvent(new Event('start-click')) });
@@ -178,24 +193,37 @@ document.addEventListener('DOMContentLoaded', () => {
       const item = document.createElement('a');
       item.href = '#';
       item.className = 'nav-item';
-      item.innerHTML = `<span>🚩</span> ${ch.title}`;
+      item.innerHTML = `<span>🚩</span> ${escapeHTML(ch.title)}`;
       item.addEventListener('click', async (e) => {
         e.preventDefault();
-        // Remove active class from others
-        challengeList.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-        item.classList.add('active');
+        if (!currentSession) {
+          try {
+            const staleID = localStorage.getItem(STORAGE_KEY);
+            if (staleID) {
+              await fetch(`${APP_URL}/api/sessions/${encodeURIComponent(staleID)}/stop`, { method: 'POST' });
+              clearSessionStorage();
+            }
+          } catch (e) {}
+        }
         
         const body = { challenge_id: ch.id };
         try {
-          const sid = localStorage.getItem(STORAGE_KEY);
-          if (sid) body.session_id = sid;
+          if (currentSession && currentSession.id) {
+            body.session_id = currentSession.id;
+          }
         } catch (e) {}
         const resp = await fetch(`${APP_URL}/api/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (!resp.ok) { alert('Failed to start session'); return; }
+        if (!resp.ok) {
+          const err = await resp.text();
+          alert(`Failed to start session: ${err || resp.statusText}`);
+          return;
+        }
         const payload = await resp.json();
         const session = payload.session || payload;
         initializeSession(session);
         saveSessionToStorage(session);
+        challengeList.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+        item.classList.add('active');
       });
       challengeList.appendChild(item);
     });

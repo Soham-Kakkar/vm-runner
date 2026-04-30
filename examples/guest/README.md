@@ -1,6 +1,8 @@
 # Guest Example Artifacts
 
 This directory contains the reference guest-side setup for VMRunner-backed CTFs.
+For the full ISO-to-working-CTF procedure, read `docs/ISO_TO_QCOW2.md` from the
+repository root.
 
 Files:
 
@@ -18,6 +20,9 @@ Expected runtime layout inside the guest:
 - flag output directory owned by `vmrunner:ctf` at `/var/lib/vmrunner/challenges`
 - optional base image asset at `/opt/ctf/abc_base.jpg` (readable by `vmrunner`)
 
+The solve page exposes the VM console. It does not separately display files
+from the qcow2. The `ctf` user must inspect the files from inside the VM.
+
 Suggested guest permissions:
 
 ```sh
@@ -30,9 +35,18 @@ install -o vmrunner -g vmrunner -m 0500 place_flags.sh /usr/local/bin/place_flag
 install -d -o vmrunner -g ctf -m 2750 /var/lib/vmrunner/challenges
 ```
 
+If a challenge script writes into `/home/ctf` instead, make that directory
+writable by the service user and group-readable by the student:
+
+```sh
+install -d -o ctf -g ctf -m 2775 /home/ctf
+adduser vmrunner ctf 2>/dev/null || usermod -aG ctf vmrunner
+```
+
 The service examples mount the QEMU 9p tag automatically:
 
 ```sh
+mkdir -p /mnt/vmrunner
 mount -t 9p -o trans=virtio,version=9p2000.L vmrunner /mnt/vmrunner
 ```
 
@@ -49,3 +63,7 @@ Generated demo outputs:
 
 - `abc.txt`: `flag{<hmac>_txt}` starts at character 80 by default.
 - `abc.jpg`: `FLAG:flag{<hmac>_img}` is appended so `strings abc.jpg` can find it.
+
+The flag templates in `place_flags.sh` must exactly match the maker UI. If the
+guest writes `flag{txt+<hmac>_txt}` but the web question expects
+`flag{text+<hmac>_txt}`, submissions will fail.
