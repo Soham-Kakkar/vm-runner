@@ -56,6 +56,7 @@ VM Runner is a Go-based CTF session platform for launching QEMU-backed challenge
 ### API Overview
 - `GET /api/ctfs`
 - `POST /api/ctfs`
+- `POST /api/uploads/qcow2`
 - `POST /api/ctfs/:id/publish`
 - `POST /api/ctfs/:id/disable`
 - `POST /api/challenges`

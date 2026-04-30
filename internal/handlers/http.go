@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -17,6 +18,8 @@ type HTTPHandler struct {
 	sessionManager *service.SessionManager
 }
 
+const maxQCOW2UploadBytes = 40 << 30
+
 func NewHTTPHandler(cs *storage.FileStore, sm *service.SessionManager) *HTTPHandler {
 	return &HTTPHandler{challengeStore: cs, sessionManager: sm}
 }
@@ -25,6 +28,7 @@ func (h *HTTPHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/health", h.handleHealth)
 	mux.HandleFunc("/api/auth/register", h.handleAuth)
 	mux.HandleFunc("/api/auth/login", h.handleAuth)
+	mux.HandleFunc("/api/uploads/qcow2", h.handleQCOW2Upload)
 	mux.HandleFunc("/api/ctfs", h.handleCTFs)
 	mux.HandleFunc("/api/ctfs/", h.handleCTFActions)
 	mux.HandleFunc("/api/challenges", h.handleChallenges)
@@ -80,6 +84,39 @@ func (h *HTTPHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *HTTPHandler) handleQCOW2Upload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxQCOW2UploadBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, fmt.Sprintf("invalid upload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		file, header, err = r.FormFile("qcow2")
+	}
+	if err != nil {
+		http.Error(w, "qcow2 file field is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	path, err := h.challengeStore.SaveUploadedQCOW2(file, header.Filename)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"image_path": path,
+		"filename":   header.Filename,
+	})
+}
+
 func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -95,10 +132,23 @@ func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if ctf.ID == "" || ctf.Title == "" {
-			http.Error(w, "ctf id and title are required", http.StatusBadRequest)
+		if strings.TrimSpace(ctf.Title) == "" {
+			http.Error(w, "ctf title is required", http.StatusBadRequest)
 			return
 		}
+		ctf.Title = strings.TrimSpace(ctf.Title)
+		ctfID, err := h.challengeStore.GenerateUniqueCTFID(ctf.Title)
+		if err != nil {
+			http.Error(w, "failed to generate ctf id", http.StatusInternalServerError)
+			return
+		}
+		ctf.ID = ctfID
+		vmConfig, err := storage.NormalizeMakerVMConfig(ctf.VMConfig)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctf.VMConfig = vmConfig
 		if ctf.Status == "" {
 			ctf.Status = storage.CTFStatusDraft
 		}
@@ -107,6 +157,17 @@ func (h *HTTPHandler) handleCTFs(w http.ResponseWriter, r *http.Request) {
 		if ctf.Visibility == "" {
 			ctf.Visibility = storage.CTFVisibilityPrivate
 		}
+		for i := range ctf.Challenges {
+			if strings.TrimSpace(ctf.Challenges[i].Title) == "" {
+				http.Error(w, "each question requires a name", http.StatusBadRequest)
+				return
+			}
+			ctf.Challenges[i] = storage.NormalizeChallengeForMaker(ctf.Challenges[i], ctf.VMConfig)
+			ctf.Challenges[i].CTFID = ctf.ID
+			ctf.Challenges[i].CreatedAt = ctf.CreatedAt
+			ctf.Challenges[i].UpdatedAt = ctf.CreatedAt
+		}
+		ensureUniqueChallengeIDs(ctf.Challenges)
 		if err := h.challengeStore.CreateCTF(ctf); err != nil {
 			http.Error(w, "failed to create ctf", http.StatusInternalServerError)
 			return
@@ -189,15 +250,24 @@ func (h *HTTPHandler) handleChallenges(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if challenge.CTFID == "" || challenge.ID == "" || challenge.Title == "" {
-			http.Error(w, "ctf_id, id and title are required", http.StatusBadRequest)
+		if challenge.CTFID == "" || strings.TrimSpace(challenge.Title) == "" {
+			http.Error(w, "ctf_id and question name are required", http.StatusBadRequest)
 			return
 		}
+		ctf, err := h.challengeStore.GetCTF(challenge.CTFID)
+		if err != nil {
+			http.Error(w, "ctf not found", http.StatusNotFound)
+			return
+		}
+		challenge = storage.NormalizeChallengeForMaker(challenge, ctf.VMConfig)
+		challenge.CTFID = ctf.ID
+		existingIDs := make(map[string]bool, len(ctf.Challenges))
+		for _, existing := range ctf.Challenges {
+			existingIDs[existing.ID] = true
+		}
+		challenge.ID = uniqueChallengeID(challenge.ID, existingIDs)
 		challenge.CreatedAt = time.Now().UTC()
 		challenge.UpdatedAt = challenge.CreatedAt
-		if challenge.Validator == "" {
-			challenge.Validator = storage.ChallengeValidatorStatic
-		}
 		if err := h.challengeStore.CreateChallenge(challenge.CTFID, challenge); err != nil {
 			http.Error(w, "failed to create challenge", http.StatusInternalServerError)
 			return
@@ -380,5 +450,26 @@ func (h *HTTPHandler) handleSubmitAnswer(w http.ResponseWriter, r *http.Request,
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(payload)
+}
+
+func ensureUniqueChallengeIDs(challenges []storage.Challenge) {
+	seen := make(map[string]bool, len(challenges))
+	for i := range challenges {
+		challenges[i].ID = uniqueChallengeID(challenges[i].ID, seen)
+	}
+}
+
+func uniqueChallengeID(id string, seen map[string]bool) string {
+	if id == "" {
+		id = "q"
+	}
+	base := id
+	for i := 2; seen[id]; i++ {
+		id = fmt.Sprintf("%s-%d", base, i)
+	}
+	seen[id] = true
+	return id
 }

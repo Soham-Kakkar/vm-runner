@@ -7,8 +7,8 @@
   <link rel="stylesheet" href="../styles.css">
   <style>
     .maker-form { display: flex; flex-direction: column; gap: 24px; max-width: 800px; }
-    .section-title { border-bottom: 1px solid var(--border-color); padding-bottom: 8px; margin-bottom: 16px; font-size: 18px; }
-    .challenge-editor { background: var(--panel-color); border: 1px solid var(--border-color); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+    .section-title { border-bottom: 1px solid var(--border-default); padding-bottom: 8px; margin-bottom: 16px; font-size: 18px; }
+    .challenge-editor { background: var(--bg-input); border: 1px solid var(--border-default); border-radius: 6px; padding: 16px; margin-bottom: 16px; }
     .form-group { display: flex; flex-direction: column; gap: 8px; }
     .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   </style>
@@ -48,11 +48,7 @@
             <div class="stack">
               <div class="form-row">
                 <div class="form-group">
-                  <label>CTF ID (Unique)</label>
-                  <input type="text" id="ctf-id" required placeholder="sql-injection">
-                </div>
-                <div class="form-group">
-                  <label>Title</label>
+                  <label>CTF Name</label>
                   <input type="text" id="ctf-title" required placeholder="SQL Injection Lab">
                 </div>
               </div>
@@ -76,17 +72,14 @@
           </div>
 
           <div class="card">
-            <h3 class="section-title">Default VM Configuration</h3>
+            <h3 class="section-title">Base VM</h3>
             <div class="stack">
               <div class="form-group">
-                <label>ISO Image Path (on server)</label>
-                <input type="text" id="vm-image" placeholder="/data/iso/alpine.iso">
+                <label>Base QCOW2 Upload</label>
+                <input type="file" id="vm-image-file" accept=".qcow2" required>
+                <p id="upload-status" class="muted" style="font-size: 12px;"></p>
               </div>
-              <div class="form-row">
-                <div class="form-group">
-                  <label>Memory (MB)</label>
-                  <input type="text" id="vm-memory" value="1024">
-                </div>
+              <div class="form-row" style="grid-template-columns: 1fr;">
                 <div class="form-group">
                   <label>Display Type</label>
                   <select id="vm-display">
@@ -100,8 +93,8 @@
 
           <div id="challenges-container">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-              <h3 style="font-size: 18px;">Challenges</h3>
-              <button type="button" id="add-challenge-btn">+ Add Challenge</button>
+              <h3 style="font-size: 18px;">Questions</h3>
+              <button type="button" id="add-challenge-btn">+ Add Question</button>
             </div>
             <div id="challenges-list" class="stack">
               <!-- Challenges will be added here -->
@@ -115,46 +108,40 @@
   <template id="challenge-template">
     <div class="challenge-editor">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
-        <h4 class="challenge-num">Challenge #1</h4>
+        <h4 class="challenge-num">Question #1</h4>
         <button type="button" class="danger remove-btn" style="padding: 2px 8px; font-size: 12px;">Remove</button>
       </div>
       <div class="stack">
         <div class="form-row">
           <div class="form-group">
-            <label>ID</label>
-            <input type="text" class="ch-id" required placeholder="chal-1">
+            <label>Question Number</label>
+            <input type="number" class="ch-qno" value="1" min="1" step="1">
           </div>
           <div class="form-group">
-            <label>Title</label>
+            <label>Question Name</label>
             <input type="text" class="ch-title" required placeholder="Basics">
           </div>
         </div>
         <div class="form-group">
-          <label>Description</label>
+          <label>Question Text</label>
           <textarea class="ch-desc" rows="2"></textarea>
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label>Validator</label>
+            <label>Validation Style</label>
             <select class="ch-validator">
-              <option value="static">Static Flag</option>
               <option value="hmac">HMAC (Dynamic)</option>
+              <option value="static">Static Flag</option>
             </select>
           </div>
-          <div class="form-group validator-field static-only">
-            <label>Flag</label>
+          <div class="form-group validator-field static-only hidden">
+            <label>Flag Format</label>
             <input type="text" class="ch-flag" placeholder="flag{...}">
           </div>
-          <div class="form-group validator-field hmac-only hidden">
-            <label>Template</label>
+          <div class="form-group validator-field hmac-only">
+            <label>Flag Format</label>
             <input type="text" class="ch-template" value="flag{<hmac>}">
           </div>
-        </div>
-        <div class="form-row">
-           <div class="form-group">
-              <label>Question No (for HMAC)</label>
-              <input type="text" class="ch-qno" value="1">
-           </div>
         </div>
       </div>
     </div>

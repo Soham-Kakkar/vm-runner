@@ -76,7 +76,7 @@ func (sm *SessionManager) persistedSessionPath(sessionID string) string {
 
 func (sm *SessionManager) saveSessionToDisk(s *storage.Session) error {
 	path := sm.persistedSessionPath(s.ID)
-	data, err := json.MarshalIndent(s, "", "  ")
+	data, err := storage.MarshalIndentNoEscape(s)
 	if err != nil {
 		return err
 	}

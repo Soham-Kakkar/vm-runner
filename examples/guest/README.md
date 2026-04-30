@@ -6,7 +6,7 @@ Files:
 
 - `vmrunner.service`: systemd unit that runs the flag placement bootstrap.
 - `vmrunner.openrc`: OpenRC unit for Alpine-style guests.
-- `place_flags.sh`: reads the injected seed, generates HMAC flags, and writes challenge files.
+- `place_flags.sh`: reads the injected seed, generates expected flags, and prepares challenge files inside the guest.
 
 Expected runtime layout inside the guest:
 
@@ -36,7 +36,7 @@ The service examples mount the QEMU 9p tag automatically:
 mount -t 9p -o trans=virtio,version=9p2000.L vmrunner /mnt/vmrunner
 ```
 
-To try it manually inside a guest or container:
+To try the script manually inside a guest or container:
 
 ```sh
 export VMRUNNER_BIN=./vmrunner

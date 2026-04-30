@@ -1,10 +1,14 @@
 package storage
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +30,14 @@ const (
 	SessionStatusActive  = "active"
 	SessionStatusStopped = "stopped"
 	SessionStatusExpired = "expired"
+
+	DefaultMakerImageFormat    = "qcow2"
+	DefaultMakerMemoryMB       = 1024
+	DefaultMakerCPUs           = 1
+	DefaultMakerArchitecture   = "x86_64"
+	DefaultMakerTimeoutSeconds = 1800
+
+	NanoIDAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
 )
 
 type VMConfig struct {
@@ -94,9 +106,9 @@ type Session struct {
 }
 
 type User struct {
-	Username string    `json:"username"`
-	Password string    `json:"password"` // In a real app, this should be hashed
-	Role     string    `json:"role"`     // "admin" or "user"
+	Username  string    `json:"username"`
+	Password  string    `json:"password"` // In a real app, this should be hashed
+	Role      string    `json:"role"`     // "admin" or "user"
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -105,6 +117,7 @@ type FileStore struct {
 	ctfPath    string
 	userPath   string
 	legacyPath string
+	uploadPath string
 }
 
 func NewFileStore(basePath string) *FileStore {
@@ -113,7 +126,175 @@ func NewFileStore(basePath string) *FileStore {
 		ctfPath:    filepath.Join(basePath, "ctfs"),
 		userPath:   filepath.Join(basePath, "users.json"),
 		legacyPath: filepath.Join(basePath, "challenges"),
+		uploadPath: filepath.Join(basePath, "uploads", "qcow2"),
 	}
+}
+
+func Slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlphaNum {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		return "ctf"
+	}
+	return slug
+}
+
+func NanoID(length int) (string, error) {
+	if length <= 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	b.Grow(length)
+	max := big.NewInt(int64(len(NanoIDAlphabet)))
+	for b.Len() < length {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", err
+		}
+		b.WriteByte(NanoIDAlphabet[n.Int64()])
+	}
+	return b.String(), nil
+}
+
+func (s *FileStore) GenerateUniqueCTFID(title string) (string, error) {
+	slug := Slugify(title)
+	for i := 0; i < 10; i++ {
+		suffix, err := NanoID(6)
+		if err != nil {
+			return "", err
+		}
+		id := slug + "-" + suffix
+		if _, err := os.Stat(filepath.Join(s.ctfPath, id+".json")); errors.Is(err, fs.ErrNotExist) {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("failed to generate unique ctf id")
+}
+
+func MakeChallengeID(questionNo int, title string) string {
+	prefix := "q"
+	if questionNo > 0 {
+		prefix = fmt.Sprintf("q%d", questionNo)
+	}
+	slug := Slugify(title)
+	if slug == "" || slug == "ctf" {
+		return prefix
+	}
+	return prefix + "-" + slug
+}
+
+func (s *FileStore) SaveUploadedQCOW2(src io.Reader, originalName string) (string, error) {
+	if !strings.EqualFold(filepath.Ext(originalName), ".qcow2") {
+		return "", fmt.Errorf("uploaded image must be a .qcow2 file")
+	}
+	var header [4]byte
+	if _, err := io.ReadFull(src, header[:]); err != nil {
+		return "", fmt.Errorf("uploaded image is too small")
+	}
+	if header != [4]byte{'Q', 'F', 'I', 0xfb} {
+		return "", fmt.Errorf("uploaded image is not a qcow2 image")
+	}
+	if err := os.MkdirAll(s.uploadPath, 0o755); err != nil {
+		return "", err
+	}
+	base := Slugify(strings.TrimSuffix(filepath.Base(originalName), filepath.Ext(originalName)))
+	suffix, err := NanoID(6)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(s.uploadPath, base+"-"+suffix+".qcow2")
+	dst, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+
+	if _, err := dst.Write(header[:]); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func NormalizeMakerVMConfig(cfg VMConfig) (VMConfig, error) {
+	imagePath := strings.TrimSpace(cfg.ImagePath)
+	if imagePath == "" {
+		return VMConfig{}, fmt.Errorf("qcow2 image path is required")
+	}
+	if !strings.EqualFold(filepath.Ext(imagePath), ".qcow2") {
+		return VMConfig{}, fmt.Errorf("base image must be a .qcow2 file")
+	}
+
+	displayType := strings.ToLower(strings.TrimSpace(cfg.DisplayType))
+	if displayType != "vnc" {
+		displayType = "terminal"
+	}
+
+	return VMConfig{
+		ImagePath:      imagePath,
+		ImageFormat:    DefaultMakerImageFormat,
+		MemoryMB:       DefaultMakerMemoryMB,
+		CPUs:           DefaultMakerCPUs,
+		Architecture:   DefaultMakerArchitecture,
+		TimeoutSeconds: DefaultMakerTimeoutSeconds,
+		DisplayType:    displayType,
+	}, nil
+}
+
+func NormalizeChallengeForMaker(challenge Challenge, ctfVMConfig VMConfig) Challenge {
+	challenge.ID = strings.TrimSpace(challenge.ID)
+	challenge.Title = strings.TrimSpace(challenge.Title)
+	challenge.Description = strings.TrimSpace(challenge.Description)
+	challenge.ImageID = strings.TrimSpace(challenge.ImageID)
+	challenge.Validator = strings.ToLower(strings.TrimSpace(challenge.Validator))
+	if challenge.Validator == "" {
+		challenge.Validator = ChallengeValidatorStatic
+	}
+	if challenge.Validator != ChallengeValidatorHMAC {
+		challenge.Validator = ChallengeValidatorStatic
+	}
+	challenge.Flag = strings.TrimSpace(challenge.Flag)
+	challenge.Template = strings.TrimSpace(challenge.Template)
+	if challenge.Validator == ChallengeValidatorHMAC && challenge.Template == "" {
+		challenge.Template = "flag{<hmac>}"
+	}
+	if challenge.QuestionNo <= 0 {
+		challenge.QuestionNo = 1
+	}
+	if challenge.ID == "" {
+		challenge.ID = MakeChallengeID(challenge.QuestionNo, challenge.Title)
+	}
+	challenge.VMConfig = ctfVMConfig
+	return challenge
+}
+
+func MarshalIndentNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func (s *FileStore) GetUser(username string) (*User, error) {
@@ -160,7 +341,7 @@ func (s *FileStore) loadUsers() ([]User, error) {
 }
 
 func (s *FileStore) saveUsers(users []User) error {
-	data, err := json.MarshalIndent(users, "", "  ")
+	data, err := MarshalIndentNoEscape(users)
 	if err != nil {
 		return err
 	}
@@ -229,7 +410,7 @@ func (s *FileStore) CreateCTF(ctf CTF) error {
 		return err
 	}
 	path := filepath.Join(s.ctfPath, ctf.ID+".json")
-	data, err := json.MarshalIndent(ctf, "", "  ")
+	data, err := MarshalIndentNoEscape(ctf)
 	if err != nil {
 		return err
 	}
